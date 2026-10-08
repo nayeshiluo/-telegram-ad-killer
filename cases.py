@@ -31,7 +31,7 @@ class Cases:
         self.db.executescript('''
           CREATE TABLE IF NOT EXISTS cases(id INTEGER PRIMARY KEY AUTOINCREMENT,cid INTEGER,mid INTEGER,uid INTEGER,
             created INTEGER,deadline INTEGER,state TEXT,reason TEXT,payload TEXT,report_id INTEGER DEFAULT 0,
-            archive_id INTEGER DEFAULT 0,dry INTEGER DEFAULT 1,learn_text TEXT DEFAULT '',archive_text TEXT DEFAULT '',UNIQUE(cid,mid));
+            archive_id INTEGER DEFAULT 0,dry INTEGER DEFAULT 1,learn_text TEXT DEFAULT '',archive_text TEXT DEFAULT '',revision INTEGER DEFAULT 0,UNIQUE(cid,mid,revision));
           CREATE TABLE IF NOT EXISTS case_votes(case_id INTEGER,voter INTEGER,PRIMARY KEY(case_id,voter));
           CREATE TABLE IF NOT EXISTS active_bans(cid INTEGER,uid INTEGER,case_id INTEGER,active INTEGER,PRIMARY KEY(cid,uid));
           CREATE TABLE IF NOT EXISTS case_samples(cid INTEGER,key TEXT,case_id INTEGER,text TEXT,active INTEGER,
@@ -40,6 +40,18 @@ class Cases:
           CREATE INDEX IF NOT EXISTS case_pending ON cases(state,deadline);
           CREATE TABLE IF NOT EXISTS appeals(case_id INTEGER PRIMARY KEY,uid INTEGER,created INTEGER,text TEXT);
         ''')
+        if 'revision' not in {row[1] for row in self.db.execute('PRAGMA table_info(cases)')}:
+            # Preserve IDs referenced by votes, samples, bans and appeals.
+            # Atomic migration: old data remains usable if the transaction fails.
+            backup=__import__('sqlite3').connect(self.store.path.parent/'schema-before-revisions.db')
+            try:self.db.backup(backup)
+            finally:backup.close()
+            with self.db:
+                self.db.execute("CREATE TABLE cases_v2(id INTEGER PRIMARY KEY AUTOINCREMENT,cid INTEGER,mid INTEGER,uid INTEGER,created INTEGER,deadline INTEGER,state TEXT,reason TEXT,payload TEXT,report_id INTEGER DEFAULT 0,archive_id INTEGER DEFAULT 0,dry INTEGER DEFAULT 1,learn_text TEXT DEFAULT '',archive_text TEXT DEFAULT '',revision INTEGER DEFAULT 0,UNIQUE(cid,mid,revision))")
+                self.db.execute('INSERT INTO cases_v2 SELECT *,0 FROM cases')
+                self.db.execute('DROP TABLE cases')
+                self.db.execute('ALTER TABLE cases_v2 RENAME TO cases')
+                self.db.execute('CREATE INDEX case_pending ON cases(state,deadline)')
         # Only run at process initialization: interrupted destructive calls are
         # uncertain, not safe to replay. Keep them reachable for manual recovery.
         interrupted={'preparing':'review_post_failed','archiving':'archiving_failed',
@@ -122,15 +134,22 @@ class Cases:
     def open(self,message,reason,eligible=False,dry=None,announce=True):
         cid=message['chat']['id'];mid=message['message_id'];policy=self.store.policy(cid)
         if policy is None:return None
-        previous=self.db.execute('SELECT id FROM cases WHERE cid=? AND mid=?',(cid,mid)).fetchone()
-        if previous:return self.get(previous[0])
-        if announce and self.db.execute("SELECT COUNT(*) FROM cases WHERE cid=? AND state IN ('pending','held')",(cid,)).fetchone()[0]>=20:
-            LOG.warning('case_pending_limit chat=%s',cid);return None
+        previous=self.db.execute('SELECT id,revision,state FROM cases WHERE cid=? AND mid=? ORDER BY revision DESC LIMIT 1',(cid,mid)).fetchone()
+        if previous and previous['state']!='edited':return self.get(previous['id'])
+        revision=previous['revision']+1 if previous else 0
+        overflow=announce and self.db.execute("SELECT COUNT(*) FROM cases WHERE cid=? AND report_id>0 AND state IN ('pending','held')",(cid,)).fetchone()[0]>=20
+        if overflow and self.db.execute("SELECT COUNT(*) FROM cases WHERE cid=? AND report_id=0 AND state='held'",(cid,)).fetchone()[0]>=200:
+            self.store.event(message,{'level':'suspected','reason':'review_capacity'},'review_overflow_full')
+            LOG.error('case_overflow_full chat=%s message=%s',cid,mid);return None
+        if overflow:
+            announce=False;eligible=False
+            reason='复核卡片满额，仅人工处理；'+reason
+            LOG.warning('case_pending_limit_retained chat=%s message=%s',cid,mid)
         dry=(policy['mode']!='review') if dry is None else dry
         if not dry and self.protected(message):return None
         now=int(time.time());deadline=now+180 if eligible else 0
-        row=self.db.execute('INSERT INTO cases(cid,mid,uid,created,deadline,state,reason,payload,dry) VALUES(?,?,?,?,?,?,?,?,?)',
-             (cid,mid,message.get('from',{}).get('id'),now,deadline,'preparing',reason[:300],json.dumps(self.snapshot(message)),int(dry)))
+        row=self.db.execute('INSERT INTO cases(cid,mid,uid,created,deadline,state,reason,payload,dry,revision) VALUES(?,?,?,?,?,?,?,?,?,?)',
+             (cid,mid,message.get('from',{}).get('id'),now,deadline,'preparing',reason[:300],json.dumps(self.snapshot(message)),int(dry),revision))
         self.db.commit();n=row.lastrowid
         if announce:
             try:
@@ -138,19 +157,20 @@ class Cases:
                 posted=self.api.call('sendMessage',chat_id=cid,text=self.text(c),reply_parameters={'message_id':mid},reply_markup=self.keyboard(c),link_preview_options={'is_disabled':True})
                 self.db.execute("UPDATE cases SET report_id=?,state='pending' WHERE id=?",(posted['message_id'],n));self.db.commit()
             except Exception:self.set_state(n,'review_post_failed');raise
-        else:self.set_state(n,'pending')
+        else:self.set_state(n,'held' if overflow else 'pending')
         return self.get(n)
 
     def consider(self,message,result=None):
         cid=message['chat']['id'];policy=self.store.policy(cid)
         if policy is None or policy['mode']!='review':return False
-        if self.protected(message):return True
-        uid=message['from']['id']
+        uid=message.get("from",{}).get("id")
+        if message.get("sender_chat") or not uid or uid in {self.bot.owner,self.bot.identity["id"]}:return True
         black=self.db.execute('SELECT active FROM active_bans WHERE cid=? AND uid=?',(cid,uid)).fetchone()
         text=(message.get('text') or message.get('caption') or '')
         key=fingerprint(text)
         exact=self.db.execute('SELECT 1 FROM case_samples WHERE cid=? AND key=? AND active=1',(cid,key)).fetchone() if 20<=len(key) and len(text)<=512 else None
         if (black and black[0]) or exact:
+            if self.protected(message):return True
             c=self.open(message,'有效ID黑名单' if black and black[0] else '管理员已确认的独特广告原文',dry=False,announce=False)
             if c and c['state']=='pending':self.execute(c['id'],'id_repeat' if black and black[0] else 'sample_repeat')
             return True
@@ -160,7 +180,19 @@ class Cases:
             self.open(message,'规则疑似：'+verdict['reason']+'；无AI复核，仅人工决策',eligible=False,dry=False)
         return False
 
+    def ai_fallback(self,message,reason):
+        policy=self.store.policy(message["chat"]["id"])
+        if not policy or policy["mode"]!="review":return
+        if "_ad_features" in message and message["_ad_features"]!=features(policy):return
+        seen=self.db.execute("SELECT digest FROM case_seen WHERE cid=? AND mid=?",(message["chat"]["id"],message["message_id"])).fetchone()
+        if not seen or seen[0]!=message_key(message):return
+        evidence=policy_verdict(message,policy)
+        if evidence["level"]!="clean":
+            self.open(message,"规则疑似："+evidence["reason"]+"；"+reason+"，仅人工复核",eligible=False,dry=False)
+
     def ai_result(self,message,result):
+        if result.get("label") in {"error","uncertain"}:
+            self.ai_fallback(message,"AI失败、超时或无法确定");return
         cid=message['chat']['id'];policy=self.store.policy(cid)
         if policy is None or policy['mode']!='review' or not features(policy)['ai'] or result.get('label')!='spam':return
         if '_ad_features' in message and message['_ad_features']!=features(policy):return

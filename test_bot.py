@@ -394,9 +394,6 @@ class OutboxTests(unittest.TestCase):
         with self.assertLogs("ad-killer",level="ERROR"):
             with self.assertRaises(APIError):api.enqueue_send(chat_id=CID,text="two")
 
-if __name__ == "__main__":
-    unittest.main()
-
 class CodeEntityTests(unittest.TestCase):
     def test_identifiers_after_emoji_have_utf16_offsets(self):
         from bot import code_entities
@@ -407,3 +404,6 @@ class CodeEntityTests(unittest.TestCase):
     def test_arbitrary_html_not_interpreted(self):
         from bot import code_entities
         self.assertEqual(code_entities('<b>普通内容 & 😀</b>'),[])
+
+if __name__ == "__main__":
+    unittest.main()

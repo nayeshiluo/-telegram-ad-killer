@@ -21,13 +21,13 @@ from management import COMMANDS as MANAGEMENT_COMMANDS, MENU as MANAGEMENT_MENU
 LOG = logging.getLogger("ad-killer")
 ADMIN = {"creator", "administrator"}
 HELP = (
-    "广告杀手 v1.0.0\n默认观察，不自动删除、不自动封人。\n"
+    "广告杀手 v1.0.1\n默认观察，不自动删除、不自动封人。\n"
     "/adstatus 查看状态\n/adcheck 回复消息检测（群管理员）\n"
-    "以下仅主人可用：\n/adblock 域名 添加黑名单\n/adunblock 域名 移除黑名单\n"
+    "规则与模式设置仅主人可用：\n/adblock 域名 添加黑名单\n/adunblock 域名 移除黑名单\n"
     "/adbot @用户名 添加广告机器人疑似名单\n/adunbot @用户名 移除名单\n"
     "/admode observe 观察\n/admode delete 删除明确黑名单消息\n"
     "/admode ban CONFIRM 删除并封禁；Telegram 可能清除被封者历史消息\n"
-    "/adkill CONFIRM 回复广告，删除封禁，成功后学习\n/adlearn 回复广告，只学习\n/adforget 回复原文，撤回学习\n"
+    "群管理可用：\n/adkill CONFIRM 回复广告，删除封禁，成功后学习\n/adlearn 回复广告，只学习\n/adforget 回复原文，撤回学习\n"
     "/adreview 回复消息创建复核；观察模式只模拟\n/adcase 编号 查看案件\n/admode review CONFIRM 开启三分钟复核处罚（仅主人）\n"
     "/admanage 打开名单与案件管理面板\n/adblacklist 本群有效封禁名单\n/adhistory 用户ID 查案件\n/adunban 案件编号 解封保留样本\n/adwrong 案件编号 纠正误封\n/adwhite add/remove 用户ID 本群白名单\n/adgwhite add/remove 用户ID 全局白名单（仅主人）\n/adwhitelist 查看白名单\n/adaudit 查看变更记录\n"
     "/adsettings 打开本群检测开关\n被封成员可私聊 /adappeal AD-编号 申诉说明\n观察模式不自动处罚。AI不确定不启动倒计时。"
@@ -240,7 +240,7 @@ class Bot:
             self.management=Management(self)
 
     def ai_status(self):
-        return "AI文字/照片检测已接入（观察）；不自动学习、不自动处罚。\n"+self.ai.status() if self.ai else "AI和图片画面识别尚未接入。"
+        return "AI文字/照片检测已接入；是否处罚取决于本群模式与案件证据，不按模型单独结论封禁。\n"+self.ai.status() if self.ai else "AI和图片画面识别尚未接入。"
 
     def ai_check(self, sample, reply):
         if not self.ai:return
@@ -424,6 +424,8 @@ class Bot:
                 result = classify(replied, policy)
                 self.send(message, explain(result, replied)+( "\n以上仅规则检测，AI结果另行回复。" if self.ai else ""))
                 self.ai_check(replied,message)
+        elif name in {"/adreview", "/adcase"} and not self.cases:
+            self.send(message, "案件归档系统未配置，此命令不可用。")
         elif self.cases and name == "/adreview":
             sample=message.get("reply_to_message")
             if not sample or sample.get("chat",{}).get("id")!=cid:
@@ -456,7 +458,11 @@ class Bot:
                 if mode=="review":
                     if not self.cases:
                         self.send(message,"案件归档系统未配置，不能开启 review。");return True
-                    self.cases.ready(cid)
+                    try:
+                        self.cases.ready(cid)
+                    except (RuntimeError, APIError):
+                        self.send(message,"群或归档频道权限不足，或权限查询失败；模式未变更。")
+                        return True
                 me = self.api.call("getChatMember", chat_id=cid, user_id=self.identity["id"])
                 if mode != "observe" and (me.get("status") != "administrator" or not me.get("can_delete_messages") or (mode == "ban" and not me.get("can_restrict_members"))):
                     self.send(message, "权限不足，模式未变更。")
@@ -480,7 +486,7 @@ class Bot:
                 policy["blocked_bot_usernames"] = sorted(blocked)
                 self.store.set("group:" + str(cid), policy)
                 self.send(message, "已更新广告机器人疑似名单；只标记，不凭此自动处罚。")
-        else:
+        elif name in {"/adblock", "/adunblock"}:
             host = domain(raw[1]) if len(raw) == 2 else None
             if not host:
                 self.send(message, "请输入一个有效域名，不要输入关键词。")
@@ -523,9 +529,9 @@ class Bot:
         if uid == self.owner:
             return
         if self.management and self.management.whitelisted(cid,uid):return
-        if self.cases and self.cases.consider(message):return
         switches=features(policy)
         verdict = policy_verdict(message, policy)
+        if self.cases and self.cases.consider(message,verdict):return
         # Suspicious rule hits check admins before repeat counting; the AI worker checks other messages.
         if message.get("sender_chat") or not uid:
             if verdict["level"]!="clean":self.store.event(message,verdict,"sender_chat_review_only")
@@ -537,7 +543,8 @@ class Bot:
             if self.cases and policy["mode"]=="review":
                 self.cases.open(message,"短时间重复推广；仍需人工复核",eligible=False,dry=False)
         if self.ai and switches["ai"]:
-            self.ai.submit({**message,"_ad_features":switches})
+            if not self.ai.submit({**message,"_ad_features":switches}) and self.cases:
+                self.cases.ai_fallback(message,"AI队列满或消息不可检测")
         if verdict["level"] == "clean":
             return
         # Channel/anonymous messages never get mapped to a fake user for bans.
@@ -590,6 +597,9 @@ def main():
         key_path=Path(credential_dir)/"ai-key" if credential_dir else Path("/etc/ad-killer/ai-key")
         ai=ReviewWorker(AIClient(config["ai"],key_path.read_text().strip()),api,store.path,config["owner_id"])
     bot = Bot(api, store, identity, config["owner_id"], ai=ai)
+    for scope,commands in command_menus(config):
+        try:api.call("setMyCommands",scope=scope,commands=commands)
+        except APIError as exc:LOG.warning("menu_registration_failed code=%s",exc.code)
     stopping = False
     def stop(*_):
         nonlocal stopping

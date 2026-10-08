@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 
 URL = re.compile(r"(?:https?://|www\.)[^\s<>]+|(?:t\.me|telegram\.me)/[^\s<>]+", re.I)
 PROMOTION = ("包赔", "稳赚", "日赚", "高额返佣", "博彩", "网赌", "刷单", "兼职日结", "代开发票")
-CONTACT = re.compile(r"私聊|加我|联系|进群|点击|领取|代理|返佣|点我|点头像|客服|加v|vx|薇信|v信|@[a-z0-9_]{5,}", re.I)
+CONTACT = re.compile(r"私聊|加我|联系|进群|点击|领取|代理|返佣|点我|点头像|客服|加v|(?<![a-z0-9_])vx(?![a-z0-9_])|薇信|v信|@[a-z0-9_]{5,}", re.I)
 AD_VARIANTS = str.maketrans({
     "廣": "广", "吿": "告", "開": "开", "專": "专", "傭": "佣",
     "聯": "联", "繫": "系", "絡": "络", "領": "领", "穩": "稳",
@@ -188,7 +188,10 @@ def classify(message, policy):
             business.append("卡产品")
         sales = SALES.findall(compact)
         contact = bool(CONTACT.search(contact_text))
-        if business and (sales or contact):
+        # Category words, mentions and price discussions alone are weak evidence.
+        offer=bool(re.search(r"出售|售卖|批发|现货|供应|货源|下单|招代理|促销|返佣|免费试用|免费测试|免kyc|买退|不卡钱|免拒付|直接过|稳定跑|速刷|超刷|投流|顶级政策|包过|担保",compact))
+        solicitation=bool(re.search(r"私聊|加我|联系客服|进群|点击|领取|点我|点头像|加v|(?<![a-z0-9_])vx(?![a-z0-9_])|薇信|v信",contact_text))
+        if business and (offer or solicitation or (re.search(r"优惠|购买|先到先得|量有限",compact) and contact)):
             return {"level": "suspected", "reason": "category_and_sales", "domains": [],
                     "signals": list(dict.fromkeys(business + sales + (["联系或引流"] if contact else [])))[:8]}
         # Structure alone is insufficient: a normal forward/location is not spam.
