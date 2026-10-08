@@ -97,7 +97,7 @@ class Management:
             lines.append('变更记录（第'+str(page)+'页；含全局白名单变更）')
             rows=self.db.execute('SELECT ts,actor,action,target,case_id FROM management_audit WHERE scope IN (?,0) ORDER BY id DESC LIMIT 9 OFFSET ?',(cid,skip)).fetchall()
             labels={'white_add':'加入白名单','white_remove':'移除白名单','unban':'解封','wrong':'纠正误封','unban_failed':'解封失败或未完成','wrong_failed':'纠正未完成'}
-            for r in rows[:8]:lines.append(time.strftime('%m-%d %H:%M',time.gmtime(r[0]+28800))+' '+labels.get(r[2],r[2])+' 操作人ID：'+str(r[1])+' 用户ID：'+str(r[3])+(' '+self.bot.cases.number(r[4]) if r[4] else ''))
+            for r in rows[:8]:lines.append(time.strftime('%m-%d %H:%M',time.gmtime(r[0]+28800))+' '+labels.get(r[2],r[2])+' 操作人：管理员（ID仅后台审计） 用户ID：'+str(r[3])+(' '+self.bot.cases.number(r[4]) if r[4] else ''))
         else:
             counts=[self.db.execute(sql,(cid,)).fetchone()[0] for sql in (
                 'SELECT COUNT(*) FROM active_bans WHERE cid=? AND active=1',

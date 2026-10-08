@@ -19,6 +19,10 @@ STATES={'pending':'待复核','held':'离线积压，需人工复核','preparing
         'deleted_protected':'删帖后目标身份变化，已停止封禁','whitelisted':'已加入白名单，复核取消'}
 def state_label(value):return STATES.get(value,'处理异常，需核对：'+value)
 
+def public_reason(value):
+    """Internal moderator identifiers must never appear in public case reasons."""
+    return re.sub(r"admin:\d+", "管理员确认", value)
+
 def message_key(message):
     fields={k:message.get(k) for k in ('text','caption','entities','caption_entities','photo','video','document','via_bot','forward_origin','external_reply','contact','location')}
     return hashlib.sha256(json.dumps(fields,sort_keys=True).encode()).hexdigest()
@@ -121,7 +125,7 @@ class Cases:
                 '\n用户ID：'+str(c['uid'])+'\n用户名：'+('@'+who['username'] if who.get('username') else '无')+
                 '\n时间（北京时间）：'+time.strftime('%Y-%m-%d %H:%M:%S',time.gmtime(c['created']+28800))+
                 '\n判定来源：'+('AI复核' if c['reason'].startswith('AI：') else '规则或管理员')+
-                '\n理由：'+c['reason'][:300]+'\n'+deadline+'\n状态：'+state_label(c['state'])+
+                '\n理由：'+public_reason(c['reason'])[:300]+'\n'+deadline+'\n状态：'+state_label(c['state'])+
                 '\n需3名不同群成员驳回，或1名本群管理决策。'+
                 ('\n本人申诉：'+appeal[0] if appeal else ''))
 
@@ -211,7 +215,7 @@ class Cases:
         m=json.loads(c['payload']);u=m.get('from',{});chat=m.get('chat',{})
         copied=self.api.call('copyMessage',chat_id=self.channel,from_chat_id=c['cid'],message_id=c['mid'],disable_notification=True)
         link='https://t.me/'+chat['username']+'/'+str(c['mid']) if re.fullmatch(r'[A-Za-z0-9_]+',str(chat.get('username',''))) else '私密群原消息ID：'+str(c['mid'])
-        note=self.number(c['id'])+(' 观察测试记录（未实际处罚）' if c['dry'] else ' 处罚记录')+'\n来源群：'+str(chat.get('title') or c['cid'])+'\n群ID：'+str(c['cid'])+'\n用户ID：'+str(c['uid'])+'\n用户名：'+('@'+u['username'] if u.get('username') else '无')+'\n显示名：'+str(u.get('first_name',''))+' '+str(u.get('last_name',''))+'\n时间（北京时间）：'+time.strftime('%Y-%m-%d %H:%M:%S',time.gmtime(c['created']+28800))+'\n判定来源：'+('AI复核' if c['reason'].startswith('AI：') else '规则或管理员')+'\n来源：'+link+'\n理由：'+c['reason']+'\n证据消息：'+str(copied['message_id'])+'\n原文摘录：'+(m.get('text') or m.get('caption') or '照片/媒体，见证据消息')[:600]+'\n状态：'+(state_label(c['state']) if c['dry'] else '处罚准备中，尚未确认成功')
+        note=self.number(c['id'])+(' 观察测试记录（未实际处罚）' if c['dry'] else ' 处罚记录')+'\n来源群：'+str(chat.get('title') or c['cid'])+'\n群ID：'+str(c['cid'])+'\n用户ID：'+str(c['uid'])+'\n用户名：'+('@'+u['username'] if u.get('username') else '无')+'\n显示名：'+str(u.get('first_name',''))+' '+str(u.get('last_name',''))+'\n时间（北京时间）：'+time.strftime('%Y-%m-%d %H:%M:%S',time.gmtime(c['created']+28800))+'\n判定来源：'+('AI复核' if c['reason'].startswith('AI：') else '规则或管理员')+'\n来源：'+link+'\n理由：'+public_reason(c['reason'])+'\n证据消息：'+str(copied['message_id'])+'\n原文摘录：'+(m.get('text') or m.get('caption') or '照片/媒体，见证据消息')[:600]+'\n状态：'+(state_label(c['state']) if c['dry'] else '处罚准备中，尚未确认成功')
         markup={'inline_keyboard':[[{'text':'解除本群封禁','callback_data':'adcase:unban:'+str(c['id'])},{'text':'判定误封并撤回学习','callback_data':'adcase:wrong:'+str(c['id'])}]]}
         if c['dry']:markup={'inline_keyboard':[[{'text':self.number(c['id'])+' 查看状态','callback_data':'adcase:info:'+str(c['id'])}]]}
         record=self.api.call('sendMessage',chat_id=self.channel,text=note[:4000],reply_markup=markup,link_preview_options={'is_disabled':True},disable_notification=False)
@@ -220,7 +224,7 @@ class Cases:
     def archive_state(self,n):
         c=self.get(n)
         if not c or not c['archive_id']:return
-        text=c['archive_text'].rsplit('\n状态：',1)[0]+'\n状态：'+state_label(c['state'])+'\n更新（北京时间）：'+time.strftime('%m-%d %H:%M:%S',time.gmtime(time.time()+8*3600))
+        text=public_reason(c['archive_text']).rsplit('\n状态：',1)[0]+'\n状态：'+state_label(c['state'])+'\n更新（北京时间）：'+time.strftime('%m-%d %H:%M:%S',time.gmtime(time.time()+8*3600))
         deleted=c['state'] in {'banned','deleted','ban_pending_failed','deleted_protected','unbanned','wrong_unbanned','unban_failed'}
         text+='\n删除结果：'+('已确认删除' if deleted else '未确认删除')+'\n封禁结果：'+('已确认封禁' if c['state']=='banned' else '见案件状态；未确认仍在封禁')
         appeal=self.db.execute('SELECT text FROM appeals WHERE case_id=?',(n,)).fetchone()
@@ -241,8 +245,8 @@ class Cases:
         try:
             if self.protected(m):self.set_state(n,'protected');self.refresh(n);return
             self.ready(c['cid'],ban=ban)
-            c['reason']=c['reason']+'；处理来源：'+actor
-            self.db.execute('UPDATE cases SET reason=? WHERE id=?',(c['reason'][:300],n));self.db.commit()
+            c['reason']=c['reason']+'；处理来源：'+public_reason(actor)
+            self.db.execute('UPDATE cases SET reason=? WHERE id=?',(public_reason(c['reason'])[:300],n));self.db.commit()
             self.set_state(n,'archiving');self.archive(c)
             if self.protected(m):
                 self.set_state(n,'protected');self.refresh(n);self.archive_state(n);return

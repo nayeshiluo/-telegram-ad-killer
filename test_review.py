@@ -15,6 +15,21 @@ class ReviewTests(unittest.TestCase):
         self.store=Store(Path(self.tmp.name)/'db',self.config)
         self.api=API();self.bot=Bot(self.api,self.store,{'id':99,'username':'test_bot'},1)
     def tearDown(self):self.store.db.close();self.tmp.cleanup()
+    def test_moderator_id_private_in_case_archive_and_audit(self):
+        from cases import public_reason
+        self.assertEqual(public_reason('处理来源：admin:123456789'),'处理来源：管理员确认')
+        self.assertEqual(public_reason('普通广告理由'),'普通广告理由')
+        c=self.bot.cases.open(sample(),'内部历史 admin:123456789',announce=False,dry=False)
+        self.assertNotIn('123456789',self.bot.cases.text(c))
+        self.bot.cases.execute(c['id'],'admin:123456789')
+        for method,payload in self.api.calls:
+            self.assertNotIn('123456789',payload.get('text',''))
+        self.assertIn('admin:123456789',self.store.db.execute("SELECT reason FROM events WHERE action='case_banned'").fetchone()[0])
+        self.bot.management.audit(CID,123456789,'unban',2,c['id'])
+        text,_,_=self.bot.management.listing(CID,'audit',1)
+        self.assertNotIn('123456789',text)
+        self.assertEqual(self.store.db.execute("SELECT actor FROM management_audit WHERE action='unban'").fetchone()[0],123456789)
+
     def test_missing_archive_commands_never_mutate_domains(self):
         self.bot.cases=None
         for name in ('/adreview','/adcase'):
