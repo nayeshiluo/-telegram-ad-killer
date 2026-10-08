@@ -13,12 +13,30 @@
 ## 部署
 
 1. 创建Telegram Bot；将Bot加入源群和归档频道。源群需要管理员、删除消息和限制成员权限；归档频道需要管理员、发布消息权限。
-2. 将代码放入`/opt/ad-killer`。复制`config.example.json`为`/etc/ad-killer/config.json`，填写Bot用户名、主人ID、源群ID及归档频道ID。AI默认关闭，需支持chat/completions且支持视觉的模型服务才可检测照片。
-3. 创建`/etc/ad-killer`，权限700；以权限600保存`bot-token`及`ai-key`。关闭AI时ai-key可为空，systemd模板仍要求该文件存在。不要将Token或Key写入源码、命令行、GitHub。
+2. 将代码放入`/opt/ad-killer`，保证服务运行用户可读取源码及进入该目录。先创建root所有的`/etc/ad-killer`，权限700；再复制`config.example.json`为该目录的`config.json`，以root所有、权限600保存。填写下表中的配置，勿使用示例ID。
+3. 以root所有、权限600分别保存`bot-token`及`ai-key`，每个文件只有对应凭证。关闭AI时ai-key可为空，systemd模板仍要求该文件存在。不要将Token或Key写入源码、命令行、GitHub。服务通过`LoadCredential`读取这三个文件，并以`AD_CONFIG=%d/config.json`定位运行时配置副本；无需放宽配置目录或文件权限。
 4. 安装`ad-killer.service`到`/etc/systemd/system/`，执行`systemctl daemon-reload`与`systemctl enable --now ad-killer`。
 5. 只启动一个轮询实例；已有Webhook会拒绝启动，不擅自清除。检查`systemctl status ad-killer`和`/var/log/ad-killer/bot.log`。
 
 服务以DynamicUser运行，SQLite在`/var/lib/ad-killer`；日志轮转，总大小约4MiB；默认内存上限160MiB、CPU30%。不需要公开Web端口。
+
+### 必填配置与首次验收
+
+| 项目 | 保存位置/说明 |
+| --- | --- |
+| Bot Token | `/etc/ad-killer/bot-token`，由BotFather签发 |
+| Bot用户名 | `expected_username`，不含`@`，必须与Token对应 |
+| 主人Telegram数字ID | `owner_id`，不是用户名或手机号 |
+| 源群数字ID | `groups`中的键，每个群分别授权；默认`mode: observe` |
+| 归档频道数字ID | `archive_channel`，完整案件流程需要频道发布权限 |
+| AI URL、模型、开关 | `ai.base_url`、`ai.model`、`ai.enabled`；启用AI时填写 |
+| AI密钥 | `/etc/ad-killer/ai-key`，不放入config.json |
+
+AI需要支持OpenAI兼容的`chat/completions`接口；照片识别还需模型支持视觉。远程服务必须使用HTTPS，只有字面本机回环地址可用HTTP。示例`127.0.0.1:8000`只是占位：没有在自己的服务器运行对应接口就不能使用。项目不提供模型额度；使用的是部署者自己配置的上游服务额度。
+
+首次部署先在测试群保持observe，确认`/adstatus`、回复消息的`/adcheck`和`/adreview`模拟按钮正常，检查频道归档权限。确实需要真实处罚时，由主人发送`/admode review CONFIRM`。管理员主动`/adkill CONFIRM`即使observe也会真实删除封禁，不要拿重要账号测试。
+
+本项目目前是手工部署，不是填写四项即可运行的一键安装器。建议使用支持systemd凭证机制的Ubuntu 24.04或更新版本。若启动失败，检查`systemctl status ad-killer`、`journalctl -u ad-killer -n 50`和日志；不要把凭证原文贴到公开Issue。已部署实例升级前备份源代码、配置和SQLite，检查已有drop-in设置，不要覆盖生产配置或删除已有数据库。
 
 启动时自动注册主人私聊、群管理和主人群内命令菜单；注册失败会写入日志。命令权限由程序实时校验，与客户端是否显示菜单无关。
 

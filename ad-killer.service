@@ -12,6 +12,8 @@ WorkingDirectory=/opt/ad-killer
 ExecStart=/usr/bin/python3 -B /opt/ad-killer/bot.py
 LoadCredential=bot-token:/etc/ad-killer/bot-token
 LoadCredential=ai-key:/etc/ad-killer/ai-key
+LoadCredential=config.json:/etc/ad-killer/config.json
+Environment=AD_CONFIG=%d/config.json
 StateDirectory=ad-killer
 LogsDirectory=ad-killer
 UMask=0077
