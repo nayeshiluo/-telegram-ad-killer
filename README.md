@@ -1,0 +1,1 @@
+# -telegram-ad-killer
