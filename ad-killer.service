@@ -1,0 +1,38 @@
+[Unit]
+Description=Independent Telegram Ad Killer
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/opt/ad-killer
+ExecStart=/usr/bin/python3 -B /opt/ad-killer/bot.py
+LoadCredential=bot-token:/etc/ad-killer/bot-token
+LoadCredential=ai-key:/etc/ad-killer/ai-key
+StateDirectory=ad-killer
+LogsDirectory=ad-killer
+UMask=0077
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=45
+MemoryHigh=96M
+MemoryMax=160M
+CPUQuota=30%
+TasksMax=32
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
