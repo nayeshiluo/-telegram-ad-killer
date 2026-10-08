@@ -43,6 +43,7 @@ class Cases:
           CREATE TABLE IF NOT EXISTS case_seen(cid INTEGER,mid INTEGER,digest TEXT,PRIMARY KEY(cid,mid));
           CREATE INDEX IF NOT EXISTS case_pending ON cases(state,deadline);
           CREATE TABLE IF NOT EXISTS appeals(case_id INTEGER PRIMARY KEY,uid INTEGER,created INTEGER,text TEXT);
+          CREATE TABLE IF NOT EXISTS case_notice_cleanup(case_id INTEGER PRIMARY KEY,cid INTEGER,mid INTEGER,due INTEGER,attempts INTEGER DEFAULT 0,state TEXT DEFAULT 'pending');
         ''')
         if 'revision' not in {row[1] for row in self.db.execute('PRAGMA table_info(cases)')}:
             # Preserve IDs referenced by votes, samples, bans and appeals.
@@ -261,6 +262,8 @@ class Cases:
             with self.db:
                 self.db.execute("UPDATE cases SET state='banned' WHERE id=?",(n,))
                 self.db.execute('INSERT OR REPLACE INTO active_bans VALUES(?,?,?,1)',(c['cid'],c['uid'],n))
+                if c['report_id']:
+                    self.db.execute("INSERT OR IGNORE INTO case_notice_cleanup(case_id,cid,mid,due) VALUES(?,?,?,?)",(n,c['cid'],c['report_id'],int(time.time())+180))
                 if actor.startswith('admin:'):
                     text=(c['learn_text'] or m.get('text') or m.get('caption') or '')[:512];key=fingerprint(text)
                     if len(key)>=20:
@@ -389,8 +392,23 @@ class Cases:
             if action=='reject':self.cancel(c['id'],'admin_rejected')
             elif action=='ban':self.execute(c['id'],'admin:'+str(uid))
 
+    def cleanup_notices(self,now):
+        rows=self.db.execute("SELECT case_id,cid,mid,attempts FROM case_notice_cleanup WHERE state='pending' AND due<=? ORDER BY due LIMIT 5",(now,)).fetchall()
+        for n,cid,mid,attempts in rows:
+            try:
+                # Only the stored bot notice, never the user's original or channel archive.
+                self.api.call('deleteMessage',chat_id=cid,message_id=mid)
+                self.db.execute("UPDATE case_notice_cleanup SET state='done' WHERE case_id=?",(n,))
+            except Exception as exc:
+                code=getattr(exc,'code',0)
+                terminal=code in {400,403} or attempts>=4
+                self.db.execute("UPDATE case_notice_cleanup SET attempts=attempts+1,state=?,due=? WHERE case_id=?",('failed' if terminal else 'pending',now+max(30,min(getattr(exc,'retry_after',0),300)),n))
+                LOG.warning('case_notice_cleanup_failed case=%s code=%s terminal=%s',n,code,terminal)
+            self.db.commit()
+
     def tick(self):
         now=int(time.time())
+        self.cleanup_notices(now)
         rows=self.db.execute("SELECT id,deadline,dry,cid FROM cases WHERE state='pending' AND deadline>0 AND deadline<=? ORDER BY deadline LIMIT 5",(now,)).fetchall()
         for n,deadline,dry,cid in rows:
             policy=self.store.policy(cid)

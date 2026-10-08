@@ -15,6 +15,32 @@ class ReviewTests(unittest.TestCase):
         self.store=Store(Path(self.tmp.name)/'db',self.config)
         self.api=API();self.bot=Bot(self.api,self.store,{'id':99,'username':'test_bot'},1)
     def tearDown(self):self.store.db.close();self.tmp.cleanup()
+    def test_successful_ban_notice_deleted_after_three_minutes_only(self):
+        c=self.bot.cases.open(sample(),'test',dry=False)
+        with patch('cases.time.time',return_value=1000):self.bot.cases.execute(c['id'],'admin:20')
+        self.assertEqual(self.store.db.execute('SELECT due FROM case_notice_cleanup').fetchone()[0],1180)
+        self.api.calls=[]
+        self.bot.cases.cleanup_notices(1179);self.assertEqual(self.api.calls,[])
+        self.bot.cases.cleanup_notices(1180)
+        self.assertEqual(self.api.calls,[('deleteMessage',{'chat_id':CID,'message_id':c['report_id']})])
+        self.bot.cases.cleanup_notices(2000);self.assertEqual(len(self.api.calls),1)
+    def test_notice_cleanup_persists_restart_and_failed_ban_not_scheduled(self):
+        from cases import Cases
+        c=self.bot.cases.open(sample(),'test',dry=False)
+        self.api.fail='banChatMember';self.bot.cases.execute(c['id'],'admin:20')
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM case_notice_cleanup').fetchone()[0],0)
+        self.api.fail=None
+        c=self.bot.cases.open({**sample(),'message_id':8},'test',dry=False)
+        self.bot.cases.execute(c['id'],'admin:20')
+        reopened=Cases(self.bot,CH);self.api.calls=[];reopened.cleanup_notices(10**12)
+        self.assertEqual(self.api.calls,[('deleteMessage',{'chat_id':CID,'message_id':c['report_id']})])
+    def test_notice_cleanup_retry_is_bounded_and_does_not_ban(self):
+        self.store.db.execute('INSERT INTO case_notice_cleanup(case_id,cid,mid,due) VALUES(1,?,100,0)',(CID,));self.store.db.commit()
+        self.api.fail='deleteMessage'
+        self.bot.cases.cleanup_notices(1000)
+        self.assertEqual(self.store.db.execute('SELECT state FROM case_notice_cleanup').fetchone()[0],'failed')
+        self.assertNotIn('banChatMember',[m for m,p in self.api.calls])
+
     def test_moderator_id_private_in_case_archive_and_audit(self):
         from cases import public_reason
         self.assertEqual(public_reason('处理来源：admin:123456789'),'处理来源：管理员确认')
