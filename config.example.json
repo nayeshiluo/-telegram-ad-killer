@@ -2,6 +2,7 @@
   "expected_username": "your_ad_killer_bot",
   "owner_id": 100000001,
   "archive_channel": -1001234567891,
+  "review_flow": "quarantine",
   "ai": {
     "enabled": false,
     "base_url": "http://127.0.0.1:8000/v1",

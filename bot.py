@@ -28,7 +28,7 @@ HELP = (
     "/admode observe 观察\n/admode delete 删除明确黑名单消息\n"
     "/admode ban CONFIRM 删除并封禁；Telegram 可能清除被封者历史消息\n"
     "群管理可用：\n/adkill CONFIRM 回复广告，删除封禁，成功后学习\n/adlearn 回复广告，只学习\n/adforget 回复原文，撤回学习\n"
-    "/adreview 回复消息创建复核；观察模式只模拟\n/adcase 编号 查看案件\n/admode review CONFIRM 开启三分钟复核处罚（仅主人）\n"
+    "/adreview 回复消息创建复核；观察模式只模拟\n/adcase 编号 查看案件\n/admode review CONFIRM 开启复核模式（仅主人）\n"
     "/admanage 打开名单与案件管理面板\n/adblacklist 本群有效封禁名单\n/adhistory 用户ID 查案件\n/adunban 案件编号 解封保留样本\n/adwrong 案件编号 纠正误封\n/adwhite add/remove 用户ID 本群白名单\n/adgwhite add/remove 用户ID 全局白名单（仅主人）\n/adwhitelist 查看白名单\n/adaudit 查看变更记录\n"
     "/adsettings 打开本群检测开关\n被封成员可私聊 /adappeal AD-编号 申诉说明\n观察模式不自动处罚。AI不确定不启动倒计时。"
 )

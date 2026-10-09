@@ -184,7 +184,7 @@ class Management:
         return False
 
     def callback(self,q):
-        match=re.fullmatch(r'adm:([a-f0-9]{12}):(home|black|history|white|audit|settings|toggle|case|unban|wrong):(\d{1,12})',str(q.get('data','')))
+        match=re.fullmatch(r'adm:([a-f0-9]{12}):(home|black|history|white|audit|settings|toggle|case|unban|wrong|confirm|reject):(\d{1,12})',str(q.get('data','')))
         if not match:return
         token,action,value=match.groups();value=int(value);uid=q.get('from',{}).get('id');origin=q.get('message',{})
         def ack(text):
@@ -205,12 +205,19 @@ class Management:
             self.bot.store.set('group:'+str(cid),policy)
             self.audit(cid,uid,'feature_'+key+'_'+('on' if switches[key] else 'off'))
             action,value='settings',1
-        if action in {'case','unban','wrong'}:
+        if action in {'case','unban','wrong','confirm','reject'}:
             c=self.bot.cases.get(value)
             if not c or c['cid']!=cid:return
-            if action!='case' and not c['dry']:self.bot.cases.unban(value,wrong=action=='wrong',actor=uid)
+            if action in {'confirm','reject'}:
+                if not self.bot.cases.quarantine or c['state'] not in {'pending','held'}:return
+                if action=='confirm':self.bot.cases.execute(value,'admin:'+str(uid))
+                else:self.bot.cases.cancel(value,'admin_rejected')
+            elif action!='case' and not c['dry']:self.bot.cases.unban(value,wrong=action=='wrong',actor=uid)
             c=self.bot.cases.get(value);text=self.bot.cases.text(c)
             rows=[]
+            if self.bot.cases.quarantine and not c['dry'] and c['state'] in {'pending','held'}:
+                rows=[[{'text':'确认广告并永久封禁','callback_data':'adm:'+token+':confirm:'+str(value)}],
+                      [{'text':'管理驳回，撤销本Bot限制','callback_data':'adm:'+token+':reject:'+str(value)}]]
             if not c['dry'] and c['state'] in {'banned','ban_pending_failed','unban_failed','unbanned'}:
                 rows=[[{'text':'解除本群封禁（保留样本）','callback_data':'adm:'+token+':unban:'+str(value)}],
                       [{'text':'纠正误封并撤回本案学习','callback_data':'adm:'+token+':wrong:'+str(value)}]]

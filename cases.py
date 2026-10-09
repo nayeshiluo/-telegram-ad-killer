@@ -9,8 +9,8 @@ from policy import verdict as policy_verdict, features
 
 LOG=logging.getLogger('ad-killer')
 ADMIN={'creator','administrator'}
-STATES={'pending':'待复核','held':'离线积压，需人工复核','preparing':'创建中','review_post_failed':'复核消息发送失败',
-        'archiving':'归档中','archiving_failed':'归档失败，未处罚','delete_pending':'正在删帖','delete_pending_failed':'删帖失败或结果不确定，未继续封禁',
+STATES={'pending':'待复核','held':'等待人工复核','preparing':'创建中','review_post_failed':'复核消息发送失败',
+        'archiving':'归档中','archiving_failed':'归档失败，未永久封禁','delete_pending':'正在删帖','delete_pending_failed':'删帖失败或结果不确定，未继续封禁',
         'ban_pending':'正在封禁','ban_pending_failed':'删帖完成，封禁失败或结果不确定','banned':'已删除并封禁','deleted':'已删除，未封禁',
         'simulated_ban':'模拟封禁完成，未实际处罚','protected':'目标受权限保护，已停止','member_rejected':'群友三票驳回','admin_rejected':'管理驳回',
         'edited':'原文已编辑，旧案件取消','mode_cancelled':'模式已变更，自动处罚取消','unban_pending':'正在解除封禁',
@@ -66,6 +66,11 @@ class Cases:
             changed=self.db.execute('UPDATE cases SET state=? WHERE state=?',(new,old)).rowcount
             if changed:LOG.warning('case_restart_recovery from=%s to=%s count=%s',old,new,changed)
         self.db.commit()
+        self.quarantine=None
+        if self.store.config.get('review_flow')=='quarantine':
+            from quarantine import Quarantine
+            self.quarantine=Quarantine(self)
+            self.db.execute("UPDATE cases SET deadline=0 WHERE dry=0 AND state IN ('pending','held')");self.db.commit()
 
     def get(self,n):
         row=self.db.execute('SELECT * FROM cases WHERE id=?',(n,)).fetchone()
@@ -79,7 +84,9 @@ class Cases:
         previous=self.db.execute('SELECT digest FROM case_seen WHERE cid=? AND mid=?',(cid,mid)).fetchone()
         if previous and previous[0]!=digest:
             rows=self.db.execute("SELECT id FROM cases WHERE cid=? AND mid=? AND state IN ('pending','held')",(cid,mid)).fetchall()
-            for row in rows:self.set_state(row[0],'edited');self.refresh(row[0])
+            for row in rows:
+                if self.quarantine and not self.quarantine.release(row[0]):continue
+                self.set_state(row[0],'edited');self.refresh(row[0])
         self.db.execute('INSERT OR REPLACE INTO case_seen VALUES(?,?,?)',(cid,mid,digest))
         self.db.execute('DELETE FROM case_seen WHERE rowid NOT IN (SELECT rowid FROM case_seen ORDER BY rowid DESC LIMIT 5000)')
         self.db.commit()
@@ -120,6 +127,9 @@ class Cases:
         deadline=('截止：'+time.strftime('%H:%M:%S',time.gmtime(c['deadline']+8*3600))+'（北京时间）') if c['deadline'] else '仅管理员复核，无超时处罚'
         chat=m.get('chat',{})
         appeal=self.db.execute('SELECT text FROM appeals WHERE case_id=?',(c['id'],)).fetchone()
+        if self.quarantine and not c['dry']:
+            deadline='等待人工审核，无超时永久封禁。\n'+self.quarantine.detail(c['id'])
+            deadline+='\n原文摘录：'+(m.get('text') or m.get('caption') or c['learn_text'] or '图片/媒体')[:600]
         return (self.number(c['id'])+' '+('观察测试，绝不实际处罚' if c['dry'] else '广告复核')+
                 '\n来源群：'+str(chat.get('title') or c['cid'])+'\n群ID：'+str(c['cid'])+
                 '\n显示名：'+str(who.get('first_name',''))+' '+str(who.get('last_name',''))+
@@ -159,16 +169,24 @@ class Cases:
             LOG.warning('case_pending_limit_retained chat=%s message=%s',cid,mid)
         dry=(policy['mode']!='review') if dry is None else dry
         if not dry and self.protected(message):return None
-        now=int(time.time());deadline=now+180 if eligible else 0
+        now=int(time.time());deadline=now+180 if eligible and (dry or not self.quarantine) else 0
         row=self.db.execute('INSERT INTO cases(cid,mid,uid,created,deadline,state,reason,payload,dry,revision) VALUES(?,?,?,?,?,?,?,?,?,?)',
              (cid,mid,message.get('from',{}).get('id'),now,deadline,'preparing',reason[:300],json.dumps(self.snapshot(message)),int(dry),revision))
         self.db.commit();n=row.lastrowid
+        if self.quarantine and eligible and not dry and not overflow:
+            self.quarantine.start(n)
         if announce:
             try:
                 c=self.get(n);c['state']='pending'
                 posted=self.api.call('sendMessage',chat_id=cid,text=self.text(c),reply_parameters={'message_id':mid,'allow_sending_without_reply':True},reply_markup=self.keyboard(c),link_preview_options={'is_disabled':True})
                 self.db.execute("UPDATE cases SET report_id=?,state='pending' WHERE id=?",(posted['message_id'],n));self.db.commit()
-            except Exception:self.set_state(n,'review_post_failed');raise
+            except Exception:
+                if self.quarantine:
+                    self.set_state(n,'held')
+                    LOG.warning('quarantine_review_post_failed case=%s',n)
+                    try:self.api.enqueue_send(chat_id=self.bot.owner,text=self.number(n)+' 复核卡片发送失败。请在 /admanage 案件历史中处理；禁言最长24小时，不会自动永久封禁。')
+                    except Exception:LOG.warning('quarantine_owner_notice_failed case=%s',n)
+                else:self.set_state(n,'review_post_failed');raise
         else:self.set_state(n,'held' if overflow else 'pending')
         return self.get(n)
 
@@ -181,13 +199,17 @@ class Cases:
         text=(message.get('text') or message.get('caption') or '')
         key=fingerprint(text)
         exact=self.db.execute('SELECT 1 FROM case_samples WHERE cid=? AND key=? AND active=1',(cid,key)).fetchone() if 20<=len(key) and len(text)<=512 else None
-        if (black and black[0]) or exact:
+        if black and black[0] or (exact and not self.quarantine):
             if self.protected(message):return True
             c=self.open(message,'有效ID黑名单' if black and black[0] else '管理员已确认的独特广告原文',dry=False,announce=False)
             if c and c['state']=='pending':self.execute(c['id'],'id_repeat' if black and black[0] else 'sample_repeat')
             return True
         verdict=result or policy_verdict(message,policy)
-        if verdict.get('level')=='confirmed':self.open(message,verdict['reason'],eligible=True,dry=False)
+        if exact and self.quarantine:
+            self.open(message,'管理员已确认的独特广告原文',eligible=True,dry=False);return True
+        if verdict.get('level')=='confirmed':
+            self.open(message,verdict['reason'],eligible=True,dry=False)
+            if self.quarantine:return True
         elif verdict.get('level')=='suspected' and (not self.bot.ai or not features(policy)['ai']):
             self.open(message,'规则疑似：'+verdict['reason']+'；无AI复核，仅人工决策',eligible=False,dry=False)
         return False
@@ -217,6 +239,7 @@ class Cases:
         c=self.open(message,'AI：'+result.get('reason','')+('；规则/可读广告文字同时命中' if eligible else '；证据不足，不自动处罚'),eligible=eligible,dry=False)
         if c and ocr:
             self.db.execute('UPDATE cases SET learn_text=? WHERE id=?',(ocr[:512],c['id']));self.db.commit()
+            if self.quarantine:self.refresh(c['id'])
 
     def archive(self,c):
         if c['archive_id']:return
@@ -257,9 +280,10 @@ class Cases:
         c=self.get(n)
         if not c or not c['archive_id']:return
         text=public_reason(c['archive_text']).rsplit('\n状态：',1)[0]+'\n状态：'+state_label(c['state'])+'\n更新（北京时间）：'+time.strftime('%m-%d %H:%M:%S',time.gmtime(time.time()+8*3600))
-        deleted=c['state'] in {'banned','deleted','ban_pending_failed','deleted_protected','unbanned','wrong_unbanned','unban_failed'}
+        q=self.quarantine.get(n) if self.quarantine else None
+        deleted=bool(q and q['deleted']) or c['state'] in {'banned','deleted','ban_pending_failed','deleted_protected','unbanned','wrong_unbanned','unban_failed'}
         text+='\n删除结果：'+('已确认删除' if deleted else '未确认删除')+'\n封禁结果：'+('已确认封禁' if c['state']=='banned' else '见案件状态；未确认仍在封禁')
-        if '原消息已不存在' in c['archive_text']:
+        if '原消息已不存在' in c['archive_text'] or q and q['deleted']==2:
             text=text.replace('删除结果：已确认删除','删除结果：原消息已不存在，无法核实删除者')
         appeal=self.db.execute('SELECT text FROM appeals WHERE case_id=?',(n,)).fetchone()
         if appeal:text+='\n本人申诉待管理员审核：'+appeal[0]
@@ -285,7 +309,9 @@ class Cases:
             if self.protected(m):
                 self.set_state(n,'protected');self.refresh(n);self.archive_state(n);return
             self.set_state(n,'delete_pending')
-            try:self.api.call('deleteMessage',chat_id=c['cid'],message_id=c['mid'])
+            q=self.quarantine.get(n) if self.quarantine else None
+            try:
+                if not q or not q['deleted']:self.api.call('deleteMessage',chat_id=c['cid'],message_id=c['mid'])
             except Exception as exc:
                 if getattr(exc,'kind',None)!='message_missing':raise
                 self.db.execute("UPDATE cases SET archive_text=replace(archive_text,'\\n证据消息：','\\n原消息已不存在，无法核实删除者\\n证据消息：') WHERE id=?",(n,));self.db.commit()
@@ -306,10 +332,17 @@ class Cases:
                         self.db.execute('INSERT OR REPLACE INTO case_samples VALUES(?,?,?,?,1)',(c['cid'],key,n,text))
                         self.db.execute('DELETE FROM case_samples WHERE cid=? AND rowid NOT IN (SELECT rowid FROM case_samples WHERE cid=? ORDER BY rowid DESC LIMIT 1000)',(c['cid'],c['cid']))
             self.store.event(m,{'level':'confirmed','reason':actor},'case_banned')
+            if self.quarantine:
+                self.db.execute('DELETE FROM case_notice_cleanup WHERE case_id=?',(n,));self.db.commit()
+                self.quarantine.finalize(n)
         except Exception as exc:
             self.db.rollback()
             current=self.get(n)['state']
-            if current!='banned':self.set_state(n,current+'_failed')
+            if current!='banned':
+                if self.quarantine and current in {'pending','archiving','delete_pending'}:
+                    self.set_state(n,'held')
+                    self.db.execute('UPDATE cases SET reason=? WHERE id=?',((public_reason(c['reason'])+'；操作失败，未永久封禁，请管理重试或驳回')[:300],n));self.db.commit()
+                else:self.set_state(n,current+'_failed')
             LOG.warning('case_action_failed case=%s stage=%s type=%s',n,current,type(exc).__name__)
         self.refresh(n);self.archive_state(n)
 
@@ -340,7 +373,13 @@ class Cases:
         except Exception as exc:LOG.warning('observation_archive_failed case=%s type=%s',n,type(exc).__name__)
 
     def cancel(self,n,state='rejected'):
+        if self.quarantine and not self.quarantine.release(n):
+            self.refresh(n);return
         self.set_state(n,state);self.refresh(n);self.archive_observation(n)
+        if self.quarantine:
+            self.archive_state(n)
+            c=self.get(n)
+            if c['report_id']:self.quarantine.schedule(c['cid'],c['report_id'],int(time.time())+180)
 
     def appeal(self,message):
         """Only self-owned real cases; no management privilege or automatic unban."""
@@ -445,9 +484,12 @@ class Cases:
     def tick(self):
         now=int(time.time())
         self.cleanup_notices(now)
+        if self.quarantine:self.quarantine.tick(now)
         rows=self.db.execute("SELECT id,deadline,dry,cid FROM cases WHERE state='pending' AND deadline>0 AND deadline<=? ORDER BY deadline LIMIT 5",(now,)).fetchall()
         for n,deadline,dry,cid in rows:
             policy=self.store.policy(cid)
+            if self.quarantine and not dry:
+                self.db.execute('UPDATE cases SET deadline=0 WHERE id=?',(n,));self.db.commit();self.refresh(n);continue
             if not dry and (not policy or policy['mode']!='review'):self.cancel(n,'mode_cancelled')
             elif now-deadline>120:
                 self.set_state(n,'held');self.db.execute('UPDATE cases SET deadline=0 WHERE id=?',(n,));self.db.commit();self.refresh(n)
@@ -460,4 +502,5 @@ class Cases:
         pending=self.db.execute("SELECT COUNT(*) FROM cases WHERE state IN ('pending','held')"+clause,params).fetchone()[0]
         active=self.db.execute('SELECT COUNT(*) FROM active_bans WHERE active=1'+clause,params).fetchone()[0]
         learned=self.db.execute('SELECT COUNT(*) FROM case_samples WHERE active=1'+clause,params).fetchone()[0]
-        return '复核案件：'+str(pending)+'；有效ID记录：'+str(active)+'；案件学习样本：'+str(learned)+'\n归档频道：'+str(self.channel)+'\n观察模式按钮只模拟；review模式才执行自动处罚。'
+        flow='证据充分先删帖、临时禁言24小时；永久封禁仅管理确认。无人审核保留卡片，禁言到期结束。' if self.quarantine else '观察模式按钮只模拟；review模式才执行自动处罚。'
+        return '复核案件：'+str(pending)+'；有效ID记录：'+str(active)+'；案件学习样本：'+str(learned)+'\n归档频道：'+str(self.channel)+'\n'+flow
