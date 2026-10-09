@@ -160,6 +160,10 @@ class Telegram:
                 description = str(error.get("description", "")).lower()
                 if "query is too old" in description or "query id is invalid" in description:
                     kind = "expired_callback"
+                elif method == 'copyMessage' and 'message to copy not found' in description:
+                    kind = 'message_missing'
+                elif method == 'deleteMessage' and 'message to delete not found' in description:
+                    kind = 'message_missing'
             except Exception:
                 pass
             LOG.warning("telegram_failed method=%s code=%s kind=%s", method, exc.code, kind)

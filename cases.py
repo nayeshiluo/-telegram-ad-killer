@@ -159,7 +159,7 @@ class Cases:
         if announce:
             try:
                 c=self.get(n);c['state']='pending'
-                posted=self.api.call('sendMessage',chat_id=cid,text=self.text(c),reply_parameters={'message_id':mid},reply_markup=self.keyboard(c),link_preview_options={'is_disabled':True})
+                posted=self.api.call('sendMessage',chat_id=cid,text=self.text(c),reply_parameters={'message_id':mid,'allow_sending_without_reply':True},reply_markup=self.keyboard(c),link_preview_options={'is_disabled':True})
                 self.db.execute("UPDATE cases SET report_id=?,state='pending' WHERE id=?",(posted['message_id'],n));self.db.commit()
             except Exception:self.set_state(n,'review_post_failed');raise
         else:self.set_state(n,'held' if overflow else 'pending')
@@ -214,13 +214,37 @@ class Cases:
     def archive(self,c):
         if c['archive_id']:return
         m=json.loads(c['payload']);u=m.get('from',{});chat=m.get('chat',{})
-        copied=self.api.call('copyMessage',chat_id=self.channel,from_chat_id=c['cid'],message_id=c['mid'],disable_notification=True)
+        evidence='原消息复制'
+        try:
+            copied=self.api.call('copyMessage',chat_id=self.channel,from_chat_id=c['cid'],message_id=c['mid'],disable_notification=True)
+        except Exception as exc:
+            if getattr(exc,'kind',None)!='message_missing':raise
+            evidence='原消息已不存在；使用机器人接收时的快照，无法核实删除者'
+            copied=self.archive_snapshot(c,m)
         link='https://t.me/'+chat['username']+'/'+str(c['mid']) if re.fullmatch(r'[A-Za-z0-9_]+',str(chat.get('username',''))) else '私密群原消息ID：'+str(c['mid'])
         note=self.number(c['id'])+(' 观察测试记录（未实际处罚）' if c['dry'] else ' 处罚记录')+'\n来源群：'+str(chat.get('title') or c['cid'])+'\n群ID：'+str(c['cid'])+'\n用户ID：'+str(c['uid'])+'\n用户名：'+('@'+u['username'] if u.get('username') else '无')+'\n显示名：'+str(u.get('first_name',''))+' '+str(u.get('last_name',''))+'\n时间（北京时间）：'+time.strftime('%Y-%m-%d %H:%M:%S',time.gmtime(c['created']+28800))+'\n判定来源：'+('AI复核' if c['reason'].startswith('AI：') else '规则或管理员')+'\n来源：'+link+'\n理由：'+public_reason(c['reason'])+'\n证据消息：'+str(copied['message_id'])+'\n原文摘录：'+(m.get('text') or m.get('caption') or '照片/媒体，见证据消息')[:600]+'\n状态：'+(state_label(c['state']) if c['dry'] else '处罚准备中，尚未确认成功')
-        markup={'inline_keyboard':[[{'text':'解除本群封禁','callback_data':'adcase:unban:'+str(c['id'])},{'text':'判定误封并撤回学习','callback_data':'adcase:wrong:'+str(c['id'])}]]}
+        note=note.replace('\n证据消息：','\n证据保存：'+evidence+'\n证据消息：')
+        markup={'inline_keyboard':[[{'text':self.number(c['id'])+' 查看状态','callback_data':'adcase:info:'+str(c['id'])}]]}
         if c['dry']:markup={'inline_keyboard':[[{'text':self.number(c['id'])+' 查看状态','callback_data':'adcase:info:'+str(c['id'])}]]}
         record=self.api.call('sendMessage',chat_id=self.channel,text=note[:4000],reply_markup=markup,link_preview_options={'is_disabled':True},disable_notification=False)
         self.db.execute('UPDATE cases SET archive_id=?,archive_text=? WHERE id=?',(record['message_id'],note[:4000],c['id']));self.db.commit()
+
+    def archive_snapshot(self,c,m):
+        # Reuse Telegram media IDs; never download arbitrary URLs or fabricate an original copy.
+        for key,method,arg in (('photo','sendPhoto','photo'),('video','sendVideo','video'),('document','sendDocument','document')):
+            media=m.get(key)
+            if not media:continue
+            item=media[-1] if key=='photo' else media
+            try:
+                return self.api.call(method,chat_id=self.channel,**{arg:item['file_id']},caption=m.get('caption','')[:1024],disable_notification=True)
+            except Exception as exc:
+                if getattr(exc,'code',0)!=400:raise
+                LOG.warning('archive_snapshot_media_unavailable case=%s',c['id'])
+        text=m.get('text') or m.get('caption') or c['learn_text']
+        if not text:raise RuntimeError('archive_snapshot_unavailable')
+        if any(m.get(k) for k in ('photo','video','document')):
+            text='媒体无法重发；以下为已保留的说明文字/OCR（不等于原图）：\n'+text
+        return self.api.call('sendMessage',chat_id=self.channel,text=text[:4096],link_preview_options={'is_disabled':True},disable_notification=True)
 
     def archive_state(self,n):
         c=self.get(n)
@@ -228,6 +252,8 @@ class Cases:
         text=public_reason(c['archive_text']).rsplit('\n状态：',1)[0]+'\n状态：'+state_label(c['state'])+'\n更新（北京时间）：'+time.strftime('%m-%d %H:%M:%S',time.gmtime(time.time()+8*3600))
         deleted=c['state'] in {'banned','deleted','ban_pending_failed','deleted_protected','unbanned','wrong_unbanned','unban_failed'}
         text+='\n删除结果：'+('已确认删除' if deleted else '未确认删除')+'\n封禁结果：'+('已确认封禁' if c['state']=='banned' else '见案件状态；未确认仍在封禁')
+        if '原消息已不存在' in c['archive_text']:
+            text=text.replace('删除结果：已确认删除','删除结果：原消息已不存在，无法核实删除者')
         appeal=self.db.execute('SELECT text FROM appeals WHERE case_id=?',(n,)).fetchone()
         if appeal:text+='\n本人申诉待管理员审核：'+appeal[0]
         if c['dry']:text=self.number(n)+' 观察测试记录（未实际处罚）\n'+text.partition('\n')[2]
@@ -252,7 +278,10 @@ class Cases:
             if self.protected(m):
                 self.set_state(n,'protected');self.refresh(n);self.archive_state(n);return
             self.set_state(n,'delete_pending')
-            self.api.call('deleteMessage',chat_id=c['cid'],message_id=c['mid'])
+            try:self.api.call('deleteMessage',chat_id=c['cid'],message_id=c['mid'])
+            except Exception as exc:
+                if getattr(exc,'kind',None)!='message_missing':raise
+                self.db.execute("UPDATE cases SET archive_text=replace(archive_text,'\\n证据消息：','\\n原消息已不存在，无法核实删除者\\n证据消息：') WHERE id=?",(n,));self.db.commit()
             if not ban:
                 self.set_state(n,'deleted');self.refresh(n);self.archive_state(n);return
             if self.protected(m):

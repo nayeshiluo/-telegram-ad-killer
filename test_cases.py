@@ -77,6 +77,39 @@ class CaseTests(unittest.TestCase):
     def test_archive_failure_aborts_delete_and_ban(self):
         c=self.create(False);self.api.fail='copyMessage';self.callback(c,'ban')
         self.assertNotIn('deleteMessage',self.methods());self.assertNotIn('banChatMember',self.methods())
+    def test_missing_original_archives_snapshot_and_can_ban(self):
+        c=self.create(False);original=self.api.call
+        def call(method,**params):
+            if method in {'copyMessage','deleteMessage'}:
+                self.api.calls.append((method,params));raise APIError(400,kind='message_missing')
+            return original(method,**params)
+        self.api.call=call;self.callback(c,'ban')
+        row=self.cases.get(c['id'])
+        self.assertEqual(row['state'],'banned')
+        self.assertGreater(row['archive_id'],0)
+        self.assertIn('接收时的快照',row['archive_text'])
+        self.assertIn('banChatMember',self.methods())
+        self.assertTrue(any(p.get('text')==sample()['text'] for method,p in self.api.calls if method=='sendMessage'))
+    def test_missing_original_photo_reuses_saved_file_id(self):
+        message=sample();message['photo']=[{'file_id':'stored-photo','width':800,'height':600}]
+        c=self.cases.open(message,'测试',eligible=True,dry=False);original=self.api.call
+        def call(method,**params):
+            if method=='copyMessage':raise APIError(400,kind='message_missing')
+            if method=='sendPhoto':
+                self.api.calls.append((method,params));return {'message_id':777}
+            return original(method,**params)
+        self.api.call=call;self.cases.archive(c)
+        self.assertTrue(any(p.get('photo')=='stored-photo' for method,p in self.api.calls if method=='sendPhoto'))
+        self.assertIn('证据消息：777',self.cases.get(c['id'])['archive_text'])
+    def test_snapshot_channel_failure_still_aborts_ban(self):
+        c=self.create(False);original=self.api.call
+        def call(method,**params):
+            if method=='copyMessage':raise APIError(400,kind='message_missing')
+            if method=='sendMessage' and params.get('chat_id')==CH:raise APIError(403)
+            return original(method,**params)
+        self.api.call=call;self.callback(c,'ban')
+        self.assertEqual(self.cases.get(c['id'])['state'],'archiving_failed')
+        self.assertNotIn('banChatMember',self.methods())
         self.assertEqual(self.cases.get(c['id'])['state'],'archiving_failed')
     def test_delete_failure_never_bans(self):
         c=self.create(False);self.api.fail='deleteMessage';self.callback(c,'ban')
