@@ -31,7 +31,7 @@ class Quarantine:
         c=self.cases.get(n);m=json.loads(c['payload'])
         if self.get(n) or c['dry']:return
         try:
-            if self.cases.protected(m):return
+            if self.cases.local_protected(m):return
             self.cases.ready(c['cid'])
             member=self.api.call('getChatMember',chat_id=c['cid'],user_id=c['uid'])
             if member.get('status') not in {'member','restricted'}:return
@@ -41,7 +41,9 @@ class Quarantine:
             self.db.execute('INSERT INTO quarantines(case_id,phase,until_ts,prior) VALUES(?,?,?,?)',
                             (n,phase,until,json.dumps(member)));self.db.commit()
             if phase=='mute_pending':
-                if self.cases.protected(m):self.phase(n,'protected');return
+                # Use the fresh member response above; no network action has intervened.
+                # Recheck from Telegram again after the restriction, before deleting.
+                if self.cases.local_protected(m):self.phase(n,'protected');return
                 self.api.call('restrictChatMember',chat_id=c['cid'],user_id=c['uid'],
                               permissions={key:False for key in PERMISSIONS},
                               use_independent_chat_permissions=True,until_date=until)

@@ -136,10 +136,13 @@ class Management:
 
     def command(self,message,raw):
         name=raw[0].split('@')[0];uid=message['from']['id'];cid=message['chat']['id'];private=message['chat'].get('type')=='private'
-        if message.get('sender_chat') or (private and uid!=self.bot.owner) or (not private and not self.authorized(cid,uid)):return False
-        if name in {'/adunban','/adwrong'} and not self.bot.can_moderate(cid,uid):
+        if message.get('sender_chat') or (private and uid!=self.bot.owner):return False
+        if not private and self.bot.store.policy(cid) is None:return False
+        role={'status':'creator'} if uid==self.bot.owner else self.api.call('getChatMember',chat_id=cid,user_id=uid)
+        if role.get('status') not in {'creator','administrator'}:return False
+        if name in {'/adunban','/adwrong'} and not self.bot.moderation_role(role):
             self.bot.send(message,'需要本群限制成员权限。');return True
-        if name=='/adwhite' and len(raw)>1 and not self.bot.can_configure(cid,uid):
+        if name=='/adwhite' and len(raw)>1 and role.get('status')!='creator':
             self.bot.send(message,'仅机器人主人或本群群主可以修改白名单。');return True
         args=raw[1:]
         if name=='/adgwhite':

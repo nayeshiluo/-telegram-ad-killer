@@ -99,13 +99,15 @@ class Cases:
         self.db.execute('DELETE FROM case_seen WHERE rowid NOT IN (SELECT rowid FROM case_seen ORDER BY rowid DESC LIMIT 5000)')
         self.db.commit()
 
-    def protected(self,message):
+    def local_protected(self,message):
         uid=message.get('from',{}).get('id');cid=message['chat']['id']
-        if message.get('sender_chat') or not uid or uid in {self.bot.owner,self.bot.identity['id']}:return True
-        if self.bot.management and self.bot.management.whitelisted(cid,uid):return True
-        role=self.api.call('getChatMember',chat_id=cid,user_id=uid).get('status')
-        if role not in {'member','restricted'}:return True
-        return False
+        return bool(message.get('sender_chat') or not uid or uid in {self.bot.owner,self.bot.identity['id']} or
+                    self.bot.management and self.bot.management.whitelisted(cid,uid))
+
+    def protected(self,message):
+        if self.local_protected(message):return True
+        role=self.api.call('getChatMember',chat_id=message['chat']['id'],user_id=message['from']['id']).get('status')
+        return role not in {'member','restricted'}
 
     def ready(self,cid,ban=True):
         role=self.api.call('getChatMember',chat_id=cid,user_id=self.bot.identity['id'])

@@ -21,7 +21,7 @@ from management import COMMANDS as MANAGEMENT_COMMANDS, MENU as MANAGEMENT_MENU
 LOG = logging.getLogger("ad-killer")
 ADMIN = {"creator", "administrator"}
 HELP = (
-    "广告杀手 v1.0.3\n默认观察，不自动删除、不自动封人。\n"
+    "广告杀手 v1.0.4\n默认观察，不自动删除、不自动封人。\n"
     "/adstatus 查看状态\n/adcheck 回复消息检测（群管理员）\n"
     "规则与模式设置仅主人可用：\n/adblock 域名 添加黑名单\n/adunblock 域名 移除黑名单\n"
     "/adbot @用户名 添加广告机器人疑似名单\n/adunbot @用户名 移除名单\n"
@@ -316,10 +316,14 @@ class Bot:
     def admin(self, cid, uid):
         return self.api.call("getChatMember", chat_id=cid, user_id=uid).get("status") in ADMIN
 
+    @staticmethod
+    def moderation_role(role):
+        return role.get("status")=="creator" or (role.get("status")=="administrator" and role.get("can_restrict_members") is True)
+
     def can_moderate(self, cid, uid):
         if uid == self.owner:return True
         role=self.api.call("getChatMember",chat_id=cid,user_id=uid)
-        return role.get("status")=="creator" or (role.get("status")=="administrator" and role.get("can_restrict_members") is True)
+        return self.moderation_role(role)
 
     def can_configure(self, cid, uid):
         return uid == self.owner or self.api.call("getChatMember",chat_id=cid,user_id=uid).get("status")=="creator"
@@ -409,12 +413,15 @@ class Bot:
         if message.get("sender_chat") or not uid:
             return False
         cid = message["chat"]["id"]
-        if uid != self.owner and not self.admin(cid, uid):
+        if name in MANAGEMENT_COMMANDS and self.management:
+            return self.management.command(message,raw)
+        actor_role={"status":"creator"} if uid==self.owner else self.api.call("getChatMember",chat_id=cid,user_id=uid)
+        if actor_role.get("status") not in ADMIN:
             # A known command prefix must not let ordinary users bypass scanning.
             return False
-        if name in {"/adkill","/adreview"} and not self.can_moderate(cid,uid):
+        if name in {"/adkill","/adreview"} and not self.moderation_role(actor_role):
             self.send(message,"需要本群限制成员权限。");return True
-        if name in {"/adblock","/adunblock","/adbot","/adunbot","/adlearn","/adforget"} and not self.can_configure(cid,uid):
+        if name in {"/adblock","/adunblock","/adbot","/adunbot","/adlearn","/adforget"} and actor_role.get("status")!="creator":
             self.send(message,"仅机器人主人或本群群主可以修改检测规则。");return True
         if name in MANAGEMENT_COMMANDS:
             if self.management:self.management.command(message,raw)
@@ -623,14 +630,6 @@ def main():
     LOG.info("startup username=%s authorized_groups=%s", identity["username"], len(config["groups"]))
     while not stopping:
         try:
-            if bot.cases:
-                if ai:
-                    for _ in range(20):
-                        try:sample,result=ai.results.get_nowait()
-                        except queue.Empty:break
-                        try:bot.cases.ai_result(sample,result)
-                        except Exception as exc:LOG.warning('ai_case_failed type=%s',type(exc).__name__)
-                        finally:ai.results.task_done()
             updates = api.call("getUpdates", offset=offset, timeout=1 if bot.cases else 25, limit=100,
                                allowed_updates=["message", "edited_message", "my_chat_member", "callback_query"])
             for update in updates:
@@ -648,6 +647,15 @@ def main():
                 lag = max(0, int(time.time())-int(message["date"])) if message.get("date") else -1
                 kind = "callback" if update.get("callback_query") else "message"
                 LOG.info("update_processed update=%s processing_ms=%s receive_age_s=%s kind=%s", update["update_id"], round((time.monotonic()-started)*1000), lag, kind)
+            # Handle messages/callbacks before at most one AI outcome.
+            # SQLite and destructive actions stay on the main thread.
+            if ai and bot.cases:
+                for _ in range(1):
+                    try:sample,result=ai.results.get_nowait()
+                    except queue.Empty:break
+                    try:bot.cases.ai_result(sample,result)
+                    except Exception as exc:LOG.warning('ai_case_failed type=%s',type(exc).__name__)
+                    finally:ai.results.task_done()
             if bot.cases:bot.cases.tick()
             store.set("heartbeat", int(time.time()))
         except APIError as exc:
