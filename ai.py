@@ -110,29 +110,60 @@ class ReviewWorker:
         self.results=queue.Queue(maxsize=64)
         self.cache={}
         self.cache_hits=0
+        self.consecutive_failures=0
+        self.last_failure=0
+        self.alerted=False
+        self.queue_full=0
+        self.queue_waits=[]
+        self.review_times=[]
         with sqlite3.connect(self.path) as db:
             db.execute('CREATE TABLE IF NOT EXISTS ai_reviews(chat_id INTEGER,message_id INTEGER,ts INTEGER,label TEXT,reason TEXT,observed_text TEXT,PRIMARY KEY(chat_id,message_id))')
             if 'digest' not in {row[1] for row in db.execute('PRAGMA table_info(ai_reviews)')}:
                 db.execute("ALTER TABLE ai_reviews ADD COLUMN digest TEXT DEFAULT ''")
         self.thread=threading.Thread(target=self.run,daemon=True);self.thread.start()
 
-    def submit(self,message,reply=None):
+    def submit(self,message,reply=None,urgent=False):
         if not message.get('photo') and not (message.get('text') or message.get('caption')) and not message.get('entities'):
             return False
-        try:self.jobs.put_nowait((0 if reply else 1,next(self.sequence),time.monotonic(),message,reply));return True
+        priority=0 if reply else 1 if urgent else 2 if message.get('photo') else 3
+        try:self.jobs.put_nowait((priority,next(self.sequence),time.monotonic(),message,reply));return True
         except queue.Full:
+            self.queue_full+=1
             LOG.warning('ai_queue_full');return False
+
+    def health_failure(self):
+        self.consecutive_failures+=1
+        self.last_failure=int(time.time())
+        if self.consecutive_failures>=3 and not self.alerted:
+            self.alerted=self.health_notice('⚠️ 广告杀手 AI 连续检测失败。规则、黑名单和管理员指令仍可用；AI失败不能证明消息没有广告。请用 /adstatus 查看状态。')
+
+    def health_notice(self,text):
+        try:
+            self.api.enqueue_send(chat_id=self.owner,text=text)
+            return True
+        except Exception:
+            LOG.warning('ai_health_notice_failed')
+            return False
+
+    def health_success(self):
+        self.consecutive_failures=0
+        if self.alerted:
+            self.health_notice('✅ 广告杀手 AI 已恢复成功检测。此前失败的消息未自动重扫，可回复可疑消息使用 /adcheck 或由管理员处理。')
+            self.alerted=False
 
     def run(self):
         while not self.stop.is_set():
             try:_,_,queued,message,reply=self.jobs.get(timeout=.5)
             except queue.Empty:continue
+            wait=time.monotonic()-queued
+            self.queue_waits=(self.queue_waits+[wait])[-20:]
             try:
-                if not reply and time.monotonic()-queued>90:
+                if not reply and wait>90:
                     self.expired+=1;LOG.warning('ai_job_expired');self.failure_result(message);continue
                 self.process(message,reply)
             except Exception as exc:
                 self.failures+=1
+                self.health_failure()
                 LOG.warning('ai_review_failed type=%s',type(exc).__name__)
                 if not reply:self.failure_result(message)
                 if reply:
@@ -175,7 +206,10 @@ class ReviewWorker:
         if cached:
             result=dict(cached[1]);self.cache_hits+=1
         else:
+            requested=time.monotonic()
             result=self.client.review(message,self.api)
+            self.review_times=(self.review_times+[time.monotonic()-requested])[-20:]
+            self.health_success()
             if not reply:
                 self.cache[cache_key]=(time.monotonic(),dict(result))
                 if len(self.cache)>128:self.cache.pop(next(iter(self.cache)))
@@ -202,4 +236,6 @@ class ReviewWorker:
 
     def status(self):
         stamp=time.strftime('%m-%d %H:%M:%S',time.gmtime(self.last_ok+8*3600)) if self.last_ok else '本次启动尚无成功检测'
-        return 'AI队列：'+str(self.jobs.qsize())+'/32；工作线程：'+('运行' if self.thread.is_alive() else '停止')+'\n最近成功（北京时间）：'+stamp+'\n本次启动失败：'+str(self.failures)+'；过期跳过：'+str(self.expired)+'；缓存复用：'+str(self.cache_hits)
+        import statistics
+        timing=lambda values: str(round(statistics.median(values),1))+'秒' if values else '暂无样本'
+        return 'AI队列：'+str(self.jobs.qsize())+'/32；工作线程：'+('运行' if self.thread.is_alive() else '停止')+'\n最近成功（北京时间）：'+stamp+'\n本次启动失败：'+str(self.failures)+'；连续失败：'+str(self.consecutive_failures)+'；队列满：'+str(self.queue_full)+'\n过期跳过：'+str(self.expired)+'；缓存复用：'+str(self.cache_hits)+'\n最近20次排队中位耗时：'+timing(self.queue_waits)+'；模型中位耗时：'+timing(self.review_times)+'\n优先级：手动检测 → 规则疑似广告 → 图片 → 普通文字；已开始的请求不抢占。'

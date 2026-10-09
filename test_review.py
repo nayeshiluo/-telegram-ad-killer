@@ -76,7 +76,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(classify.call_count,1)
         self.assertNotIn('getChatMember',[n for n,p in self.api.calls])
     def test_queue_full_rule_hit_has_manual_case_without_countdown(self):
-        self.bot.ai=type('AI',(),{'submit':lambda *a:False})()
+        self.bot.ai=type('AI',(),{'submit':lambda *a,**kw:False})()
         self.bot.handle({'message':sample()})
         row=self.store.db.execute('SELECT state,deadline FROM cases').fetchone()
         self.assertEqual(tuple(row),('pending',0))

@@ -60,6 +60,42 @@ class WorkerTests(unittest.TestCase):
         self.worker.submit(self.message)
         self.worker.submit(self.message,reply=self.message)
         self.assertIsNotNone(self.worker.jobs.get_nowait()[-1])
+    def test_suspicious_and_photo_jobs_precede_normal_text(self):
+        self.worker.close()
+        self.worker.submit(self.message)
+        self.worker.submit({**self.message,'photo':[{'file_id':'sample'}]})
+        self.worker.submit(self.message,urgent=True)
+        self.worker.submit(self.message,reply=self.message)
+        self.assertEqual([self.worker.jobs.get_nowait()[0] for _ in range(4)],[0,1,2,3])
+    def test_health_alert_only_after_three_failures_and_once_until_recovery(self):
+        notices=[]
+        self.api.enqueue_send=lambda **kw:notices.append(kw)
+        self.worker.health_failure();self.worker.health_failure()
+        self.assertEqual(notices,[])
+        self.worker.health_failure();self.worker.health_failure()
+        self.assertEqual(len(notices),1)
+        self.assertEqual(notices[0]['chat_id'],1)
+        self.worker.health_success();self.worker.health_success()
+        self.assertEqual(len(notices),2)
+        self.assertEqual(self.worker.consecutive_failures,0)
+        for _ in range(3):self.worker.health_failure()
+        self.assertEqual(len(notices),3)
+    def test_cache_hit_does_not_claim_provider_recovery(self):
+        self.worker.process(self.message,None)
+        for _ in range(3):self.worker.health_failure()
+        self.worker.process({**self.message,'message_id':8},None)
+        self.assertTrue(self.worker.alerted)
+        self.assertEqual(self.worker.consecutive_failures,3)
+    def test_queue_overflow_counted_and_returns_false(self):
+        self.worker.close()
+        for _ in range(32):self.assertTrue(self.worker.submit(self.message))
+        self.assertFalse(self.worker.submit(self.message))
+        self.assertEqual(self.worker.queue_full,1)
+    def test_status_distinguishes_wait_from_model_time(self):
+        self.worker.queue_waits=[2,4,6]
+        self.worker.review_times=[1,3,5]
+        self.assertIn('排队中位耗时：4秒',self.worker.status())
+        self.assertIn('模型中位耗时：3秒',self.worker.status())
     def test_status_includes_failure_and_queue_not_just_enabled(self):
         self.worker.failures=3
         self.assertIn('失败：3',self.worker.status())

@@ -543,7 +543,7 @@ class Bot:
             if self.cases and policy["mode"]=="review":
                 self.cases.open(message,"短时间重复推广；仍需人工复核",eligible=False,dry=False)
         if self.ai and switches["ai"]:
-            if not self.ai.submit({**message,"_ad_features":switches}) and self.cases:
+            if not self.ai.submit({**message,"_ad_features":switches},urgent=verdict['level']!='clean') and self.cases:
                 self.cases.ai_fallback(message,"AI队列满或消息不可检测")
         if verdict["level"] == "clean":
             return
