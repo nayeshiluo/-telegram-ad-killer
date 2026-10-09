@@ -77,6 +77,7 @@ class CaseTests(unittest.TestCase):
     def test_archive_failure_aborts_delete_and_ban(self):
         c=self.create(False);self.api.fail='copyMessage';self.callback(c,'ban')
         self.assertNotIn('deleteMessage',self.methods());self.assertNotIn('banChatMember',self.methods())
+        self.assertEqual(self.cases.get(c['id'])['state'],'archiving_failed')
     def test_missing_original_archives_snapshot_and_can_ban(self):
         c=self.create(False);original=self.api.call
         def call(method,**params):
@@ -110,7 +111,23 @@ class CaseTests(unittest.TestCase):
         self.api.call=call;self.callback(c,'ban')
         self.assertEqual(self.cases.get(c['id'])['state'],'archiving_failed')
         self.assertNotIn('banChatMember',self.methods())
-        self.assertEqual(self.cases.get(c['id'])['state'],'archiving_failed')
+    def test_deleted_pending_notice_reposted_without_resetting_deadline(self):
+        c=self.create(False);original=self.api.call
+        def call(method,**params):
+            if method=='editMessageText':raise APIError(400,kind='message_missing')
+            return original(method,**params)
+        self.api.call=call;self.cases.refresh(c['id'])
+        current=self.cases.get(c['id'])
+        self.assertNotEqual(current['report_id'],c['report_id'])
+        self.assertEqual(current['deadline'],c['deadline'])
+        self.assertEqual(current['state'],'pending')
+    def test_deleted_completed_notice_is_not_reposted(self):
+        c=self.create(False);self.cases.set_state(c['id'],'banned');original=self.api.call
+        def call(method,**params):
+            if method=='editMessageText':raise APIError(400,kind='message_missing')
+            return original(method,**params)
+        self.api.call=call;count=self.methods().count('sendMessage');self.cases.refresh(c['id'])
+        self.assertEqual(count,self.methods().count('sendMessage'))
     def test_delete_failure_never_bans(self):
         c=self.create(False);self.api.fail='deleteMessage';self.callback(c,'ban')
         self.assertNotIn('banChatMember',self.methods())

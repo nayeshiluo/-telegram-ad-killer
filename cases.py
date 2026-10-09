@@ -134,7 +134,14 @@ class Cases:
         c=self.get(n)
         if not c or not c['report_id']:return
         try:self.api.call('editMessageText',chat_id=c['cid'],message_id=c['report_id'],text=self.text(c),reply_markup=self.keyboard(c),link_preview_options={'is_disabled':True})
-        except Exception:LOG.warning('case_ui_refresh_failed case=%s',n)
+        except Exception as exc:
+            if getattr(exc,'kind',None)=='message_missing' and c['state'] in {'pending','held'}:
+                try:
+                    posted=self.api.call('sendMessage',chat_id=c['cid'],text=self.text(c),reply_markup=self.keyboard(c),link_preview_options={'is_disabled':True})
+                    self.db.execute('UPDATE cases SET report_id=? WHERE id=?',(posted['message_id'],n));self.db.commit()
+                    return
+                except Exception:LOG.warning('case_ui_repost_failed case=%s',n)
+            LOG.warning('case_ui_refresh_failed case=%s',n)
 
     def open(self,message,reason,eligible=False,dry=None,announce=True):
         cid=message['chat']['id'];mid=message['message_id'];policy=self.store.policy(cid)

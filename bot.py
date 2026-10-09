@@ -164,6 +164,8 @@ class Telegram:
                     kind = 'message_missing'
                 elif method == 'deleteMessage' and 'message to delete not found' in description:
                     kind = 'message_missing'
+                elif method == 'editMessageText' and 'message to edit not found' in description:
+                    kind = 'message_missing'
             except Exception:
                 pass
             LOG.warning("telegram_failed method=%s code=%s kind=%s", method, exc.code, kind)
