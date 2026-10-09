@@ -88,7 +88,7 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(len(self.calls('unbanChatMember')),1)
     def test_failed_whitelist_audit_rolls_back_white_entry(self):
         self.store.db.execute("CREATE TRIGGER fail_audit BEFORE INSERT ON management_audit BEGIN SELECT RAISE(ABORT,'fail'); END")
-        with self.assertRaises(sqlite3.IntegrityError):self.cmd('/adwhite add 2')
+        with self.assertRaises(sqlite3.IntegrityError):self.cmd('/adwhite add 2',uid=1)
         self.store.set('offset',100)
         self.assertFalse(self.m.whitelisted(CID,2))
     def test_unban_metadata_failure_does_not_partially_clear_blacklist(self):

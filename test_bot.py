@@ -340,10 +340,10 @@ class BotTests(unittest.TestCase):
         self.assertNotIn("SECRET",str(caught.exception))
     def test_policy_change_has_recovery_snapshot(self):
         self.mode("delete")
-        self.assertEqual(len(list(Path(self.temp.name).glob("policy-before-*.db"))),1)
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM policy_history").fetchone()[0],1)
     def test_snapshot_retention_is_bounded(self):
-        for _ in range(9):self.mode("observe")
-        self.assertEqual(len(list(Path(self.temp.name).glob("policy-before-*.db"))),5)
+        for _ in range(109):self.mode("observe")
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM policy_history").fetchone()[0],100)
     def test_command_prefix_cannot_bypass_detection(self):
         self.mode("delete")
         self.bot.handle({"message":msg("/adstatus https://example.com")})

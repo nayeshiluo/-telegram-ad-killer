@@ -47,6 +47,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(public_reason('普通广告理由'),'普通广告理由')
         c=self.bot.cases.open(sample(),'内部历史 admin:123456789',announce=False,dry=False)
         self.assertNotIn('123456789',self.bot.cases.text(c))
+        self.api.roles[123456789]='administrator'
         self.bot.cases.execute(c['id'],'admin:123456789')
         for method,payload in self.api.calls:
             self.assertNotIn('123456789',payload.get('text',''))

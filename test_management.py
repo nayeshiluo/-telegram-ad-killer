@@ -25,7 +25,7 @@ class ManagementTests(unittest.TestCase):
         self.bot.handle({'callback_query':{'id':'q','from':{'id':uid},'data':'adm:'+p['token']+':'+action,
             'message':{'chat':{'id':where},'message_id':mid if mid is not None else p['mid']}}})
     def test_group_white_does_not_protect_other_group(self):
-        self.cmd('/adwhite add 2');self.assertTrue(self.m.whitelisted(CID,2));self.assertFalse(self.m.whitelisted(OTHER,2))
+        self.cmd('/adwhite add 2',uid=1);self.assertTrue(self.m.whitelisted(CID,2));self.assertFalse(self.m.whitelisted(OTHER,2))
     def test_owner_global_white_protects_all_groups(self):
         self.cmd('/adgwhite add 2',uid=1);self.assertTrue(self.m.whitelisted(OTHER,2))
     def test_group_admin_cannot_change_global_white(self):
@@ -33,23 +33,23 @@ class ManagementTests(unittest.TestCase):
     def test_ordinary_member_cannot_change_white(self):
         self.cmd('/adwhite add 2',uid=3);self.assertFalse(self.m.whitelisted(CID,2))
     def test_removing_local_does_not_remove_global(self):
-        self.cmd('/adgwhite add 2',uid=1);self.cmd('/adwhite add 2');self.cmd('/adwhite remove 2')
+        self.cmd('/adgwhite add 2',uid=1);self.cmd('/adwhite add 2',uid=1);self.cmd('/adwhite remove 2',uid=1)
         self.assertTrue(self.m.whitelisted(CID,2));self.assertIn('全局白名单仍生效',self.calls('sendMessage')[-1]['text'])
     def test_white_does_not_grant_command_access(self):
-        self.cmd('/adwhite add 3');self.cmd('/adwhite add 4',uid=3);self.assertFalse(self.m.whitelisted(CID,4))
+        self.cmd('/adwhite add 3',uid=1);self.cmd('/adwhite add 4',uid=3);self.assertFalse(self.m.whitelisted(CID,4))
     def test_white_skips_ai_and_rules_and_cases(self):
         class AI:
             def submit(self,m):raise AssertionError('white message must skip AI')
-        self.cmd('/adwhite add 2');self.bot.ai=AI();self.cmd('出售优惠广告 联系客服',uid=2)
+        self.cmd('/adwhite add 2',uid=1);self.bot.ai=AI();self.cmd('出售优惠广告 联系客服',uid=2)
         self.assertEqual(self.store.db.execute('select count(*) from cases').fetchone()[0],0)
     def test_white_cannot_be_manually_killed(self):
-        self.cmd('/adwhite add 2');self.cmd('/adkill CONFIRM',reply_to_message=sample())
+        self.cmd('/adwhite add 2',uid=1);self.cmd('/adkill CONFIRM',reply_to_message=sample())
         self.assertEqual(len(self.calls('banChatMember')),0)
     def test_white_cancels_real_pending_case(self):
         c=self.bot.cases.open(sample(),'pending',dry=False,announce=False)
-        self.cmd('/adwhite add 2');self.assertEqual(self.bot.cases.get(c['id'])['state'],'whitelisted')
+        self.cmd('/adwhite add 2',uid=1);self.assertEqual(self.bot.cases.get(c['id'])['state'],'whitelisted')
     def test_blacklisted_member_must_be_unbanned_first(self):
-        self.banned();self.cmd('/adwhite add 2');self.assertFalse(self.m.whitelisted(CID,2))
+        self.banned();self.cmd('/adwhite add 2',uid=1);self.assertFalse(self.m.whitelisted(CID,2))
     def test_admin_unban_deactivates_blacklist_preserves_samples(self):
         c=self.banned();self.cmd('/adunban '+self.bot.cases.number(c['id']))
         self.assertEqual(self.bot.cases.get(c['id'])['state'],'unbanned')
@@ -100,9 +100,9 @@ class ManagementTests(unittest.TestCase):
     def test_private_owner_global_white(self):
         self.cmd('/adgwhite add 2',uid=1,cid=1,private=True);self.assertTrue(self.m.whitelisted(OTHER,2))
     def test_whitelist_change_history_keeps_scope_and_actor(self):
-        self.cmd('/adwhite add 2');self.cmd('/adwhite remove 2')
+        self.cmd('/adwhite add 2',uid=1);self.cmd('/adwhite remove 2',uid=1)
         rows=list(map(tuple,self.store.db.execute('select scope,actor,action,target from management_audit')))
-        self.assertEqual(rows,[(CID,20,'white_add',2),(CID,20,'white_remove',2)])
+        self.assertEqual(rows,[(CID,1,'white_add',2),(CID,1,'white_remove',2)])
     def test_menu_callback_is_expired_after_one_day(self):
         self.cmd('/admanage');self.store.db.execute('update management_panels set created=0');self.store.db.commit()
         self.panel_callback('history:1');self.assertEqual(len(self.calls('editMessageText')),0)

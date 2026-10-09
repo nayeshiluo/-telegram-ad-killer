@@ -21,7 +21,7 @@ from management import COMMANDS as MANAGEMENT_COMMANDS, MENU as MANAGEMENT_MENU
 LOG = logging.getLogger("ad-killer")
 ADMIN = {"creator", "administrator"}
 HELP = (
-    "广告杀手 v1.0.1\n默认观察，不自动删除、不自动封人。\n"
+    "广告杀手 v1.0.2\n默认观察，不自动删除、不自动封人。\n"
     "/adstatus 查看状态\n/adcheck 回复消息检测（群管理员）\n"
     "规则与模式设置仅主人可用：\n/adblock 域名 添加黑名单\n/adunblock 域名 移除黑名单\n"
     "/adbot @用户名 添加广告机器人疑似名单\n/adunbot @用户名 移除名单\n"
@@ -205,16 +205,11 @@ class Store:
 
     def set(self, key, value):
         if key.startswith("group:"):
-            # Keep recoverable policy snapshots; never alter credentials.
-            stamp = str(time.time_ns())
-            backup = sqlite3.connect(self.path.parent / ("policy-before-" + stamp + ".db"))
-            try:
-                self.db.backup(backup)
-            finally:
-                backup.close()
-            snapshots = sorted(self.path.parent.glob("policy-before-*.db"))
-            for old in snapshots[:-5]:
-                old.unlink()
+            # Bounded policy history in the same transaction, without copying raw messages.
+            self.db.execute("CREATE TABLE IF NOT EXISTS policy_history(id INTEGER PRIMARY KEY,ts INTEGER,key TEXT,value TEXT)")
+            old=self.db.execute("SELECT value FROM kv WHERE key=?",(key,)).fetchone()
+            if old:self.db.execute("INSERT INTO policy_history(ts,key,value) VALUES(?,?,?)",(int(time.time()),key,old[0]))
+            self.db.execute("DELETE FROM policy_history WHERE id NOT IN (SELECT id FROM policy_history ORDER BY id DESC LIMIT 100)")
         self.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, json.dumps(value)))
         self.db.commit()
 
@@ -321,6 +316,14 @@ class Bot:
     def admin(self, cid, uid):
         return self.api.call("getChatMember", chat_id=cid, user_id=uid).get("status") in ADMIN
 
+    def can_moderate(self, cid, uid):
+        if uid == self.owner:return True
+        role=self.api.call("getChatMember",chat_id=cid,user_id=uid)
+        return role.get("status")=="creator" or (role.get("status")=="administrator" and role.get("can_restrict_members") is True)
+
+    def can_configure(self, cid, uid):
+        return uid == self.owner or self.api.call("getChatMember",chat_id=cid,user_id=uid).get("status")=="creator"
+
     def learn(self, cid, policy, sample, forget=False):
         text = (sample.get("text") or sample.get("caption") or "")[:512]
         if not text and self.ai:
@@ -409,6 +412,10 @@ class Bot:
         if uid != self.owner and not self.admin(cid, uid):
             # A known command prefix must not let ordinary users bypass scanning.
             return False
+        if name in {"/adkill","/adreview"} and not self.can_moderate(cid,uid):
+            self.send(message,"需要本群限制成员权限。");return True
+        if name in {"/adblock","/adunblock","/adbot","/adunbot","/adlearn","/adforget"} and not self.can_configure(cid,uid):
+            self.send(message,"仅机器人主人或本群群主可以修改检测规则。");return True
         if name in MANAGEMENT_COMMANDS:
             if self.management:self.management.command(message,raw)
             else:self.send(message,"案件管理系统尚未配置。")

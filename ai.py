@@ -41,15 +41,21 @@ def parse_review(content):
     return {k:value[k][:512 if k=='observed_text' else 200] for k in ('label','reason','observed_text')}
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ReviewError('redirect_blocked')
+
+
 class AIClient:
     def __init__(self,config,key):
         endpoint=urlsplit(config.get("base_url",""))
         if endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
             raise ReviewError("invalid_endpoint")
-        if endpoint.scheme!="https" and not (endpoint.scheme=="http" and endpoint.hostname in {"localhost","127.0.0.1","::1"}):
+        if endpoint.scheme!="https" and not (endpoint.scheme=="http" and endpoint.hostname in {"127.0.0.1","::1"}):
             raise ReviewError("endpoint_requires_https")
         if not endpoint.hostname:raise ReviewError("invalid_endpoint")
         self.config,self.key=config,key
+        self._open=urllib.request.build_opener(NoRedirect()).open
 
     def image(self,api,message):
         photos=message.get('photo') or []
@@ -88,7 +94,7 @@ class AIClient:
         req=urllib.request.Request(self.config['base_url'].rstrip('/')+'/chat/completions',
               data=json.dumps(payload).encode(),headers={'Authorization':'Bearer '+self.key,'Content-Type':'application/json'})
         try:
-            with urllib.request.urlopen(req,timeout=20) as response:
+            with self._open(req,timeout=20) as response:
                 body=response.read(128*1024+1)
             if len(body)>128*1024:raise ReviewError('response_too_large')
             result=json.loads(body)['choices'][0]['message']['content']

@@ -16,12 +16,20 @@ STATES={'pending':'待复核','held':'等待人工复核','preparing':'创建中
         'edited':'原文已编辑，旧案件取消','mode_cancelled':'模式已变更，自动处罚取消','unban_pending':'正在解除封禁',
         'unban_failed':'解除失败或结果不确定','unbanned':'已解除本群封禁','wrong_unbanned':'已纠正误封并撤回样本',
         'cancelled_unban':'已解封，相关待处理案件取消','superseded':'存在较新处罚，请操作最新记录','pending_failed':'权限核查失败，未处罚',
-        'deleted_protected':'删帖后目标身份变化，已停止封禁','whitelisted':'已加入白名单，复核取消'}
+        'deleted_protected':'删帖后目标身份变化，已停止封禁','whitelisted':'已加入白名单，复核取消','cancelled_ban':'成员已确认封禁，重复复核已关闭'}
 def state_label(value):return STATES.get(value,'处理异常，需核对：'+value)
 
 def public_reason(value):
     """Internal moderator identifiers must never appear in public case reasons."""
     return re.sub(r"admin:\d+", "管理员确认", value)
+
+def display_line(value):
+    # Untrusted text must not create fake structural fields or reverse their display.
+    import unicodedata
+    return ' '.join(''.join(ch if ch in '\n\r\t' or unicodedata.category(ch)[0]!='C' else '' for ch in str(value)).split())
+
+def excerpt(value):
+    return '\n'.join('│ '+display_line(line) for line in str(value)[:600].splitlines()) or '│ 图片/媒体'
 
 def message_key(message):
     fields={k:message.get(k) for k in ('text','caption','entities','caption_entities','photo','video','document','via_bot','forward_origin','external_reply','contact','location')}
@@ -115,6 +123,8 @@ class Cases:
     def number(self,n):return 'AD-'+str(n).zfill(6)
 
     def keyboard(self,c):
+        if c['state']=='ban_pending_failed':
+            return {'inline_keyboard':[[{'text':'管理核对并重试封禁','callback_data':'adcase:ban:'+str(c['id'])}]]}
         if c['state'] not in {'pending','held'}:return {'inline_keyboard':[]}
         n=c['id'];votes=self.db.execute('SELECT COUNT(*) FROM case_votes WHERE case_id=?',(n,)).fetchone()[0]
         return {'inline_keyboard':[
@@ -129,16 +139,16 @@ class Cases:
         appeal=self.db.execute('SELECT text FROM appeals WHERE case_id=?',(c['id'],)).fetchone()
         if self.quarantine and not c['dry']:
             deadline='等待人工审核，无超时永久封禁。\n'+self.quarantine.detail(c['id'])
-            deadline+='\n原文摘录：'+(m.get('text') or m.get('caption') or c['learn_text'] or '图片/媒体')[:600]
+            deadline+='\n原文摘录：'+excerpt(m.get('text') or m.get('caption') or c['learn_text'] or '图片/媒体')
         return (self.number(c['id'])+' '+('观察测试，绝不实际处罚' if c['dry'] else '广告复核')+
-                '\n来源群：'+str(chat.get('title') or c['cid'])+'\n群ID：'+str(c['cid'])+
-                '\n显示名：'+str(who.get('first_name',''))+' '+str(who.get('last_name',''))+
+                '\n来源群：'+display_line(chat.get('title') or c['cid'])+'\n群ID：'+str(c['cid'])+
+                '\n显示名：'+display_line(who.get('first_name',''))+' '+display_line(who.get('last_name',''))+
                 '\n用户ID：'+str(c['uid'])+'\n用户名：'+('@'+who['username'] if who.get('username') else '无')+
                 '\n时间（北京时间）：'+time.strftime('%Y-%m-%d %H:%M:%S',time.gmtime(c['created']+28800))+
                 '\n判定来源：'+('AI复核' if c['reason'].startswith('AI：') else '规则或管理员')+
-                '\n理由：'+public_reason(c['reason'])[:300]+'\n'+deadline+'\n状态：'+state_label(c['state'])+
+                '\n理由：'+display_line(public_reason(c['reason']))[:300]+'\n'+deadline+'\n状态：'+state_label(c['state'])+
                 '\n需3名不同群成员驳回，或1名本群管理决策。'+
-                ('\n本人申诉：'+appeal[0] if appeal else ''))
+                ('\n本人申诉：'+display_line(appeal[0]) if appeal else ''))
 
     def refresh(self,n):
         c=self.get(n)
@@ -234,9 +244,8 @@ class Cases:
         if not seen or seen[0]!=message_key(message) or self.protected(message):return
         evidence=policy_verdict(message,policy)
         ocr=result.get('observed_text','')
-        ocr_hit=features(policy)['photo'] and policy_verdict({'text':ocr},policy)['level']!='clean' if len(fingerprint(ocr))>=20 else False
-        eligible=evidence['level']!='clean' or ocr_hit
-        c=self.open(message,'AI：'+result.get('reason','')+('；规则/可读广告文字同时命中' if eligible else '；证据不足，不自动处罚'),eligible=eligible,dry=False)
+        eligible=evidence['level']!='clean'
+        c=self.open(message,'AI：'+result.get('reason','')+('；本地独立规则同时命中' if eligible else '；证据不足，仅人工复核；模型OCR不作为独立证据'),eligible=eligible,dry=False)
         if c and ocr:
             self.db.execute('UPDATE cases SET learn_text=? WHERE id=?',(ocr[:512],c['id']));self.db.commit()
             if self.quarantine:self.refresh(c['id'])
@@ -249,10 +258,11 @@ class Cases:
             copied=self.api.call('copyMessage',chat_id=self.channel,from_chat_id=c['cid'],message_id=c['mid'],disable_notification=True)
         except Exception as exc:
             if getattr(exc,'kind',None)!='message_missing':raise
-            evidence='原消息已不存在；使用机器人接收时的快照，无法核实删除者'
+            q=self.quarantine.get(c['id']) if self.quarantine else None
+            evidence='原消息已由本Bot确认删除；使用接收时的快照' if q and q['deleted']==1 else '原消息已不存在；使用机器人接收时的快照，无法核实删除者'
             copied=self.archive_snapshot(c,m)
         link='https://t.me/'+chat['username']+'/'+str(c['mid']) if re.fullmatch(r'[A-Za-z0-9_]+',str(chat.get('username',''))) else '私密群原消息ID：'+str(c['mid'])
-        note=self.number(c['id'])+(' 观察测试记录（未实际处罚）' if c['dry'] else ' 处罚记录')+'\n来源群：'+str(chat.get('title') or c['cid'])+'\n群ID：'+str(c['cid'])+'\n用户ID：'+str(c['uid'])+'\n用户名：'+('@'+u['username'] if u.get('username') else '无')+'\n显示名：'+str(u.get('first_name',''))+' '+str(u.get('last_name',''))+'\n时间（北京时间）：'+time.strftime('%Y-%m-%d %H:%M:%S',time.gmtime(c['created']+28800))+'\n判定来源：'+('AI复核' if c['reason'].startswith('AI：') else '规则或管理员')+'\n来源：'+link+'\n理由：'+public_reason(c['reason'])+'\n证据消息：'+str(copied['message_id'])+'\n原文摘录：'+(m.get('text') or m.get('caption') or '照片/媒体，见证据消息')[:600]+'\n状态：'+(state_label(c['state']) if c['dry'] else '处罚准备中，尚未确认成功')
+        note=self.number(c['id'])+(' 观察测试记录（未实际处罚）' if c['dry'] else ' 处罚记录')+'\n来源群：'+display_line(chat.get('title') or c['cid'])+'\n群ID：'+str(c['cid'])+'\n用户ID：'+str(c['uid'])+'\n用户名：'+('@'+u['username'] if u.get('username') else '无')+'\n显示名：'+display_line(u.get('first_name',''))+' '+display_line(u.get('last_name',''))+'\n时间（北京时间）：'+time.strftime('%Y-%m-%d %H:%M:%S',time.gmtime(c['created']+28800))+'\n判定来源：'+('AI复核' if c['reason'].startswith('AI：') else '规则或管理员')+'\n来源：'+link+'\n理由：'+display_line(public_reason(c['reason']))+'\n证据消息：'+str(copied['message_id'])+'\n原文摘录：'+excerpt(m.get('text') or m.get('caption') or '照片/媒体，见证据消息')+'\n状态：'+(state_label(c['state']) if c['dry'] else '处罚准备中，尚未确认成功')
         note=note.replace('\n证据消息：','\n证据保存：'+evidence+'\n证据消息：')
         markup={'inline_keyboard':[[{'text':self.number(c['id'])+' 查看状态','callback_data':'adcase:info:'+str(c['id'])}]]}
         if c['dry']:markup={'inline_keyboard':[[{'text':self.number(c['id'])+' 查看状态','callback_data':'adcase:info:'+str(c['id'])}]]}
@@ -286,7 +296,7 @@ class Cases:
         if '原消息已不存在' in c['archive_text'] or q and q['deleted']==2:
             text=text.replace('删除结果：已确认删除','删除结果：原消息已不存在，无法核实删除者')
         appeal=self.db.execute('SELECT text FROM appeals WHERE case_id=?',(n,)).fetchone()
-        if appeal:text+='\n本人申诉待管理员审核：'+appeal[0]
+        if appeal:text+='\n本人申诉待管理员审核：'+display_line(appeal[0])
         if c['dry']:text=self.number(n)+' 观察测试记录（未实际处罚）\n'+text.partition('\n')[2]
         markup={'inline_keyboard':[[{'text':self.number(n)+' 查看状态','callback_data':'adcase:info:'+str(n)}]]}
         if not c['dry'] and c['state'] in {'banned','ban_pending_failed','unban_failed','unbanned'}:
@@ -296,7 +306,29 @@ class Cases:
 
     def execute(self,n,actor,ban=True):
         c=self.get(n)
-        if not c or c['state'] not in {'pending','held'}:return
+        if not c or c['state'] not in {'pending','held','ban_pending_failed'}:return
+        if actor.startswith('admin:') and not self.bot.can_moderate(c['cid'],int(actor[6:])):return
+        if c['state']=='ban_pending_failed':
+            # Manual retry only. Reconcile Telegram first; never repeat deletion or evidence.
+            if not ban or not actor.startswith('admin:'):return
+            try:
+                self.ready(c['cid'])
+                role=self.api.call('getChatMember',chat_id=c['cid'],user_id=c['uid'])
+                if not c['archive_id']:raise RuntimeError('recovery_archive_missing')
+                if c['uid'] in {self.bot.owner,self.bot.identity['id']} or self.bot.management and self.bot.management.whitelisted(c['cid'],c['uid']):return
+                if role.get('status')=='kicked' and role.get('until_date')==0:
+                    self.complete_ban(n,c,json.loads(c['payload']),actor)
+                    self.refresh(n);self.archive_state(n);return
+                if role.get('status') not in {'member','restricted','left','kicked'} or self.bot.management and self.bot.management.whitelisted(c['cid'],c['uid']):return
+                if c['uid'] in {self.bot.owner,self.bot.identity['id']}:return
+                self.set_state(n,'ban_pending')
+                self.api.call('banChatMember',chat_id=c['cid'],user_id=c['uid'])
+                self.complete_ban(n,c,json.loads(c['payload']),actor)
+            except Exception as exc:
+                self.db.rollback()
+                if self.get(n)['state']!='banned':self.set_state(n,'ban_pending_failed')
+                LOG.warning('ban_recovery_failed case=%s type=%s',n,type(exc).__name__)
+            self.refresh(n);self.archive_state(n);return
         if c['dry']:
             self.set_state(n,'simulated_ban');self.refresh(n);self.archive_observation(n);return
         m=json.loads(c['payload'])
@@ -304,7 +336,7 @@ class Cases:
             if self.protected(m):self.set_state(n,'protected');self.refresh(n);return
             self.ready(c['cid'],ban=ban)
             c['reason']=c['reason']+'；处理来源：'+public_reason(actor)
-            self.db.execute('UPDATE cases SET reason=? WHERE id=?',(public_reason(c['reason'])[:300],n));self.db.commit()
+            self.db.execute('UPDATE cases SET reason=? WHERE id=?',(display_line(public_reason(c['reason']))[:300],n));self.db.commit()
             self.set_state(n,'archiving');self.archive(c)
             if self.protected(m):
                 self.set_state(n,'protected');self.refresh(n);self.archive_state(n);return
@@ -314,37 +346,47 @@ class Cases:
                 if not q or not q['deleted']:self.api.call('deleteMessage',chat_id=c['cid'],message_id=c['mid'])
             except Exception as exc:
                 if getattr(exc,'kind',None)!='message_missing':raise
-                self.db.execute("UPDATE cases SET archive_text=replace(archive_text,'\\n证据消息：','\\n原消息已不存在，无法核实删除者\\n证据消息：') WHERE id=?",(n,));self.db.commit()
+                self.db.execute("UPDATE cases SET archive_text=replace(archive_text,?,?) WHERE id=?",("\n证据消息：","\n原消息已不存在，无法核实删除者\n证据消息：",n));self.db.commit()
             if not ban:
                 self.set_state(n,'deleted');self.refresh(n);self.archive_state(n);return
             if self.protected(m):
                 self.set_state(n,'deleted_protected');self.refresh(n);self.archive_state(n);return
             self.set_state(n,'ban_pending')
             self.api.call('banChatMember',chat_id=c['cid'],user_id=c['uid'])
-            with self.db:
-                self.db.execute("UPDATE cases SET state='banned' WHERE id=?",(n,))
-                self.db.execute('INSERT OR REPLACE INTO active_bans VALUES(?,?,?,1)',(c['cid'],c['uid'],n))
-                if c['report_id']:
-                    self.db.execute("INSERT OR IGNORE INTO case_notice_cleanup(case_id,cid,mid,due) VALUES(?,?,?,?)",(n,c['cid'],c['report_id'],int(time.time())+180))
-                if actor.startswith('admin:'):
-                    text=(c['learn_text'] or m.get('text') or m.get('caption') or '')[:512];key=fingerprint(text)
-                    if len(key)>=20:
-                        self.db.execute('INSERT OR REPLACE INTO case_samples VALUES(?,?,?,?,1)',(c['cid'],key,n,text))
-                        self.db.execute('DELETE FROM case_samples WHERE cid=? AND rowid NOT IN (SELECT rowid FROM case_samples WHERE cid=? ORDER BY rowid DESC LIMIT 1000)',(c['cid'],c['cid']))
-            self.store.event(m,{'level':'confirmed','reason':actor},'case_banned')
-            if self.quarantine:
-                self.db.execute('DELETE FROM case_notice_cleanup WHERE case_id=?',(n,));self.db.commit()
-                self.quarantine.finalize(n)
+            self.complete_ban(n,c,m,actor)
         except Exception as exc:
             self.db.rollback()
             current=self.get(n)['state']
             if current!='banned':
                 if self.quarantine and current in {'pending','archiving','delete_pending'}:
                     self.set_state(n,'held')
-                    self.db.execute('UPDATE cases SET reason=? WHERE id=?',((public_reason(c['reason'])+'；操作失败，未永久封禁，请管理重试或驳回')[:300],n));self.db.commit()
+                    self.db.execute('UPDATE cases SET reason=? WHERE id=?',((display_line(public_reason(c['reason']))+'；操作失败，未永久封禁，请管理重试或驳回')[:300],n));self.db.commit()
                 else:self.set_state(n,current+'_failed')
             LOG.warning('case_action_failed case=%s stage=%s type=%s',n,current,type(exc).__name__)
         self.refresh(n);self.archive_state(n)
+
+    def complete_ban(self,n,c,m,actor):
+        with self.db:
+            self.db.execute("UPDATE cases SET state='banned' WHERE id=?",(n,))
+            self.db.execute('INSERT OR REPLACE INTO active_bans VALUES(?,?,?,1)',(c['cid'],c['uid'],n))
+            if c['report_id']:
+                self.db.execute("INSERT OR IGNORE INTO case_notice_cleanup(case_id,cid,mid,due) VALUES(?,?,?,?)",(n,c['cid'],c['report_id'],int(time.time())+180))
+            if actor.startswith('admin:'):
+                text=(c['learn_text'] or m.get('text') or m.get('caption') or '')[:512];key=fingerprint(text)
+                if len(key)>=20:
+                    self.db.execute('INSERT OR REPLACE INTO case_samples VALUES(?,?,?,?,1)',(c['cid'],key,n,text))
+                    self.db.execute('DELETE FROM case_samples WHERE cid=? AND rowid NOT IN (SELECT rowid FROM case_samples WHERE cid=? ORDER BY rowid DESC LIMIT 1000)',(c['cid'],c['cid']))
+        self.store.event(m,{'level':'confirmed','reason':actor},'case_banned')
+        if self.quarantine:
+            self.db.execute('DELETE FROM case_notice_cleanup WHERE case_id=?',(n,));self.db.commit()
+            self.quarantine.finalize(n)
+        siblings=[row[0] for row in self.db.execute("SELECT id FROM cases WHERE cid=? AND uid=? AND id!=? AND dry=0 AND state IN ('pending','held')",(c['cid'],c['uid'],n))]
+        self.db.execute("UPDATE cases SET state='cancelled_ban',deadline=0 WHERE cid=? AND uid=? AND id!=? AND dry=0 AND state IN ('pending','held')",(c['cid'],c['uid'],n));self.db.commit()
+        for other in siblings:
+            self.refresh(other)
+            if self.quarantine:
+                sibling=self.get(other)
+                if sibling['report_id']:self.quarantine.schedule(sibling['cid'],sibling['report_id'],int(time.time()))
 
     def manual(self,message):
         sample=message.get('reply_to_message')
@@ -447,21 +489,25 @@ class Cases:
         if action in {'unban','wrong','info'}:
             if where!=self.channel or origin.get('message_id')!=c['archive_id']:ack('不是原归档记录');return
             if uid!=self.bot.owner and self.api.call('getChatMember',chat_id=self.channel,user_id=uid).get('status') not in ADMIN:ack('仅主人或归档频道管理员可用');return
+            if action!='info' and not self.bot.can_moderate(c['cid'],uid):ack('还需要源群限制成员权限');return
             ack(self.number(c['id'])+' 当前状态：'+state_label(c['state']))
             if action!='info':self.unban(c['id'],wrong=action=='wrong',actor=uid)
             return
         if where!=c['cid'] or origin.get('message_id')!=c['report_id']:ack('不是原群复核消息');return
-        if c['state'] not in {'pending','held'}:ack('案件已经处理，不重复操作');return
+        if c['state'] not in {'pending','held','ban_pending_failed'}:ack('案件已经处理，不重复操作');return
         if uid==c['uid'] and not c['dry']:ack('不能给自己驳回');return
-        role=self.api.call('getChatMember',chat_id=c['cid'],user_id=uid).get('status')
+        member=self.api.call('getChatMember',chat_id=c['cid'],user_id=uid)
+        role=member.get('status')
+        if role=='restricted' and member.get('is_member') is not True:ack('仅本群成员可以操作');return
         if role not in {'member','restricted','administrator','creator'}:ack('仅本群成员可以操作');return
+        if c['state']=='ban_pending_failed' and action!='ban':ack('请管理核对并重试封禁');return
         if action=='vote':
             self.db.execute('INSERT OR IGNORE INTO case_votes VALUES(?,?)',(c['id'],uid));self.db.commit()
             count=self.db.execute('SELECT COUNT(*) FROM case_votes WHERE case_id=?',(c['id'],)).fetchone()[0]
             ack('驳回票：'+str(count)+'/3，每人一票')
             if count>=3:self.cancel(c['id'],'member_rejected')
             else:self.refresh(c['id'])
-        elif role not in ADMIN and uid!=self.bot.owner:ack('仅本群群主或管理员可操作')
+        elif not self.bot.can_moderate(c['cid'],uid):ack('需要本群限制成员权限')
         else:
             ack('已提交，'+('观察测试，不会真的处罚' if c['dry'] else '执行前重新核查权限'))
             if action=='reject':self.cancel(c['id'],'admin_rejected')
@@ -495,7 +541,7 @@ class Cases:
                 self.set_state(n,'held');self.db.execute('UPDATE cases SET deadline=0 WHERE id=?',(n,));self.db.commit();self.refresh(n)
             else:self.execute(n,'timeout')
         # Keep ID/history metadata; old archived/closed raw bodies have a bounded local lifetime.
-        self.db.execute("UPDATE cases SET payload='{}',learn_text='' WHERE created<? AND state NOT IN ('pending','held','preparing','archiving','delete_pending','ban_pending') AND id NOT IN (SELECT id FROM cases ORDER BY id DESC LIMIT 1000)",(now-90*86400,));self.db.commit()
+        self.db.execute("UPDATE cases SET payload='{}',learn_text='' WHERE created<? AND state NOT IN ('pending','held','preparing','archiving','delete_pending','ban_pending','ban_pending_failed') AND id NOT IN (SELECT id FROM cases ORDER BY id DESC LIMIT 1000)",(now-90*86400,));self.db.commit()
 
     def status(self,cid=None):
         clause=' AND cid=?' if cid is not None else '';params=(cid,) if cid is not None else ()

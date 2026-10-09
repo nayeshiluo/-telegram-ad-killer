@@ -14,8 +14,8 @@ class AIValidationTests(unittest.TestCase):
         self.assertEqual(len(v['reason']),200);self.assertEqual(len(v['observed_text']),512)
     def test_provider_exception_cannot_leak_key(self):
         api=type('API',(),{})()
-        with patch('urllib.request.urlopen',side_effect=ValueError('SECRET')):
-            with self.assertRaises(ReviewError) as caught:AIClient({'base_url':'http://localhost/v1','model':'test'},'SECRET').review({'text':'hello'},api)
+        with patch('urllib.request.OpenerDirector.open',side_effect=ValueError('SECRET')):
+            with self.assertRaises(ReviewError) as caught:AIClient({'base_url':'http://127.0.0.1/v1','model':'test'},'SECRET').review({'text':'hello'},api)
         self.assertNotIn('SECRET',str(caught.exception))
 
 class WorkerTests(unittest.TestCase):

@@ -147,6 +147,12 @@ def classify(message, policy):
     visible = URL.sub("", ad_text)
     visible_compact = re.sub(r"[\W_]+", "", visible)
     caution = bool(WARNING.search(visible_compact) or QUESTION.search(visible_compact) or re.search(r"[?？]", visible))
+    # Strong invitations remain suspicious when a trailing question/disclaimer is appended.
+    # Genuine warnings/questions without a call to action retain the conservative exemption.
+    strong_contact=bool(re.search(r"私聊|加我|联系|进群|点击|领取|点我|点头像|加v|薇信|v信|@[a-z0-9_]{5,}",contact_text))
+    promotion=any(term in compact for term in PROMOTION) or bool(re.search(r"出售|售卖|批发|招代理|现货|下单|返佣|代刷|刷量|刷粉|刷赞",compact))
+    warning_prefix=bool(re.match(r"(?:提醒|注意|谨防|不要信|别信|避坑|举报|反诈|广告样本)",visible_compact))
+    if strong_contact and promotion and not warning_prefix:caution=False
     key = fingerprint(ad_text)
     learned = [fingerprint(s) for s in policy.get("learned_samples", [])[:100] if isinstance(s, str)]
     if len(key) >= 3 and key in learned:

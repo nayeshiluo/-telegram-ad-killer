@@ -53,7 +53,7 @@ class FeatureTests(unittest.TestCase):
         token=self.store.db.execute('SELECT token,mid FROM management_panels').fetchone()
         q={'id':'q','data':'adm:'+token[0]+':toggle:0','from':{'id':2},'message':{'chat':{'id':CID},'message_id':token[1]}}
         self.bot.handle({'callback_query':q});self.assertTrue(features(self.store.policy(CID))['text'])
-        q['from']['id']=20;self.bot.handle({'callback_query':q})
+        q['from']['id']=1;self.bot.handle({'callback_query':q})
         self.assertFalse(features(self.store.policy(CID))['text'])
         self.assertEqual(self.store.policy(CID)['mode'],'observe')
     def test_ai_results_after_setting_change_do_not_open_case(self):

@@ -137,6 +137,10 @@ class Management:
     def command(self,message,raw):
         name=raw[0].split('@')[0];uid=message['from']['id'];cid=message['chat']['id'];private=message['chat'].get('type')=='private'
         if message.get('sender_chat') or (private and uid!=self.bot.owner) or (not private and not self.authorized(cid,uid)):return False
+        if name in {'/adunban','/adwrong'} and not self.bot.can_moderate(cid,uid):
+            self.bot.send(message,'需要本群限制成员权限。');return True
+        if name=='/adwhite' and len(raw)>1 and not self.bot.can_configure(cid,uid):
+            self.bot.send(message,'仅机器人主人或本群群主可以修改白名单。');return True
         args=raw[1:]
         if name=='/adgwhite':
             if uid!=self.bot.owner:self.bot.send(message,'仅主人可以修改全局白名单。');return True
@@ -196,6 +200,8 @@ class Management:
         cid,where,mid,_=p
         if origin.get('chat',{}).get('id')!=where or origin.get('message_id')!=mid:ack('不是原管理面板');return
         if (where!=cid and not (where==self.bot.owner and uid==self.bot.owner)) or not self.authorized(cid,uid):ack('仅主人或本群管理员可操作');return
+        if action=='toggle' and not self.bot.can_configure(cid,uid):ack('仅机器人主人或本群群主可以修改开关');return
+        if action in {'unban','wrong','confirm','reject'} and not self.bot.can_moderate(cid,uid):ack('需要本群限制成员权限');return
         ack('正在处理')
         if action=='toggle':
             from policy import DEFAULTS, features
@@ -209,17 +215,18 @@ class Management:
             c=self.bot.cases.get(value)
             if not c or c['cid']!=cid:return
             if action in {'confirm','reject'}:
-                if not self.bot.cases.quarantine or c['state'] not in {'pending','held'}:return
+                if not self.bot.cases.quarantine or c['state'] not in {'pending','held','ban_pending_failed'}:return
                 if action=='confirm':self.bot.cases.execute(value,'admin:'+str(uid))
-                else:self.bot.cases.cancel(value,'admin_rejected')
+                elif c['state']!='ban_pending_failed':self.bot.cases.cancel(value,'admin_rejected')
             elif action!='case' and not c['dry']:self.bot.cases.unban(value,wrong=action=='wrong',actor=uid)
             c=self.bot.cases.get(value);text=self.bot.cases.text(c)
             rows=[]
-            if self.bot.cases.quarantine and not c['dry'] and c['state'] in {'pending','held'}:
+            if self.bot.cases.quarantine and not c['dry'] and c['state'] in {'pending','held','ban_pending_failed'}:
                 rows=[[{'text':'确认广告并永久封禁','callback_data':'adm:'+token+':confirm:'+str(value)}],
                       [{'text':'管理驳回，撤销本Bot限制','callback_data':'adm:'+token+':reject:'+str(value)}]]
+            if c['state']=='ban_pending_failed':rows=rows[:1]
             if not c['dry'] and c['state'] in {'banned','ban_pending_failed','unban_failed','unbanned'}:
-                rows=[[{'text':'解除本群封禁（保留样本）','callback_data':'adm:'+token+':unban:'+str(value)}],
+                rows+=[[{'text':'解除本群封禁（保留样本）','callback_data':'adm:'+token+':unban:'+str(value)}],
                       [{'text':'纠正误封并撤回本案学习','callback_data':'adm:'+token+':wrong:'+str(value)}]]
             if c['archive_id']:text+='\n归档：https://t.me/c/'+str(abs(self.bot.cases.channel))[3:]+'/'+str(c['archive_id'])
             rows.append([{'text':'返回面板','callback_data':'adm:'+token+':home:1'}]);markup={'inline_keyboard':rows}
