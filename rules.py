@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 
 URL = re.compile(r"(?:https?://|www\.)[^\s<>]+|(?:t\.me|telegram\.me)/[^\s<>]+", re.I)
 PROMOTION = ("包赔", "稳赚", "日赚", "高额返佣", "博彩", "网赌", "刷单", "兼职日结", "代开发票")
-CONTACT = re.compile(r"私聊|加我|联系|进群|点击|领取|代理|返佣|点我|点头像|客服|加v|(?<![a-z0-9_])vx(?![a-z0-9_])|薇信|v信|@[a-z0-9_]{5,}", re.I)
+CONTACT = re.compile(r"私聊|加我|联系|进群|点击|领取|代理|返佣|点我|点头像|客服|加微信|添加微信|加薇信|加v|(?<![a-z0-9_])vx(?![a-z0-9_])|薇信|v信|@[a-z0-9_]{5,}", re.I)
 AD_VARIANTS = str.maketrans({
     "廣": "广", "吿": "告", "開": "开", "專": "专", "傭": "佣",
     "聯": "联", "繫": "系", "絡": "络", "領": "领", "穩": "稳",
@@ -147,12 +147,13 @@ def classify(message, policy):
     visible = URL.sub("", ad_text)
     visible_compact = re.sub(r"[\W_]+", "", visible)
     caution = bool(WARNING.search(visible_compact) or QUESTION.search(visible_compact) or re.search(r"[?？]", visible))
-    # Strong invitations remain suspicious when a trailing question/disclaimer is appended.
-    # Genuine warnings/questions without a call to action retain the conservative exemption.
-    strong_contact=bool(re.search(r"私聊|加我|联系|进群|点击|领取|点我|点头像|加v|薇信|v信|@[a-z0-9_]{5,}",contact_text))
-    promotion=any(term in compact for term in PROMOTION) or bool(re.search(r"出售|售卖|批发|招代理|现货|下单|返佣|代刷|刷量|刷粉|刷赞",compact))
-    warning_prefix=bool(re.match(r"(?:提醒|注意|谨防|不要信|别信|避坑|举报|反诈|广告样本)",visible_compact))
-    if strong_contact and promotion and not warning_prefix:caution=False
+    # Strong offers/contact invitations remain suspected regardless of a warning
+    # prefix/suffix. A tag is not proof of context; AI/manual review decides intent.
+    strong_contact=bool(re.search(r"私聊|加我|联系|进群|点击|领取|点我|点头像|加微信|添加微信|加薇信|加v|薇信|v信|@[a-z0-9_]{5,}",contact_text))
+    explicit_offer=bool(re.search(r"出售|售卖|批发|招代理|现货|下单",compact))
+    promotion=any(term in compact for term in PROMOTION) or explicit_offer or bool(re.search(r"免费(?:领取|开卡|试用|测试)",compact))
+    strong_offer=(strong_contact and promotion) or (bool(BUSINESS.search(compact)) and explicit_offer)
+    if strong_offer:caution=False
     key = fingerprint(ad_text)
     learned = [fingerprint(s) for s in policy.get("learned_samples", [])[:100] if isinstance(s, str)]
     if len(key) >= 3 and key in learned:
@@ -164,10 +165,12 @@ def classify(message, policy):
             return {"level": "suspected", "reason": "learned_sample", "domains": [], "similarity": similarity}
     bots = bot_references(message)
     listed = set(policy.get("blocked_bot_usernames", []))
-    if bots and not caution and not policy.get('disable_bot_rules'):
-        if any(name in listed for name in bots):
+    # Direct calls to use a bot do not inherit a whole-message warning exemption.
+    bot_invitation=bool(re.search(r"点击|点我|点头像|领取|进群|下单|购买",visible_compact))
+    if bots and not policy.get('disable_bot_rules'):
+        if not caution and any(name in listed for name in bots):
             return {"level": "suspected", "reason": "listed_bot", "domains": [], "signals": bots[:4]}
-        if BOT_PUSH.search(compact):
+        if BOT_PUSH.search(compact) and (not caution or bot_invitation):
             return {"level": "suspected", "reason": "bot_promotion", "domains": [],
                     "signals": ["机器人入口", *bots[:3], "推广或引流"]}
     if CARD.search(ad_text) and "开卡" in compact:
@@ -178,7 +181,7 @@ def classify(message, policy):
             bool(CONTACT.search(contact_text)),
         ))
         warning = any(word in compact for word in ("不要信", "别信", "谨防", "骗局", "避坑", "举报"))
-        if signals >= 2 and not warning and not caution:
+        if signals >= 2 and not caution and (not warning or strong_offer):
             return {"level": "suspected", "reason": "card_promotion", "domains": []}
     if any(term in compact for term in PROMOTION) and CONTACT.search(contact_text):
         if not caution:
@@ -196,7 +199,7 @@ def classify(message, policy):
         contact = bool(CONTACT.search(contact_text))
         # Category words, mentions and price discussions alone are weak evidence.
         offer=bool(re.search(r"出售|售卖|批发|现货|供应|货源|下单|招代理|促销|返佣|免费试用|免费测试|免kyc|买退|不卡钱|免拒付|直接过|稳定跑|速刷|超刷|投流|顶级政策|包过|担保",compact))
-        solicitation=bool(re.search(r"私聊|加我|联系客服|进群|点击|领取|点我|点头像|加v|(?<![a-z0-9_])vx(?![a-z0-9_])|薇信|v信",contact_text))
+        solicitation=bool(re.search(r"私聊|加我|联系客服|进群|点击|领取|点我|点头像|加微信|添加微信|加薇信|加v|(?<![a-z0-9_])vx(?![a-z0-9_])|薇信|v信",contact_text))
         if business and (offer or solicitation or (re.search(r"优惠|购买|先到先得|量有限",compact) and contact)):
             return {"level": "suspected", "reason": "category_and_sales", "domains": [],
                     "signals": list(dict.fromkeys(business + sales + (["联系或引流"] if contact else [])))[:8]}
