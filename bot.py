@@ -21,7 +21,7 @@ from management import COMMANDS as MANAGEMENT_COMMANDS, MENU as MANAGEMENT_MENU
 LOG = logging.getLogger("ad-killer")
 ADMIN = {"creator", "administrator"}
 HELP = (
-    "广告杀手 v1.0.4\n默认观察，不自动删除、不自动封人。\n"
+    "广告杀手 v1.0.5\n默认观察，不自动删除、不自动封人。\n"
     "/adstatus 查看状态\n/adcheck 回复消息检测（群管理员）\n"
     "规则与模式设置仅主人可用：\n/adblock 域名 添加黑名单\n/adunblock 域名 移除黑名单\n"
     "/adbot @用户名 添加广告机器人疑似名单\n/adunbot @用户名 移除名单\n"

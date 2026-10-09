@@ -246,8 +246,18 @@ class Cases:
         if not seen or seen[0]!=message_key(message) or self.protected(message):return
         evidence=policy_verdict(message,policy)
         ocr=result.get('observed_text','')
-        eligible=evidence['level']!='clean'
-        c=self.open(message,'AI：'+result.get('reason','')+('；本地独立规则同时命中' if eligible else '；证据不足，仅人工复核；模型OCR不作为独立证据'),eligible=eligible,dry=False)
+        independent=evidence['level']!='clean'
+        # A spam verdict is sufficient for temporary containment in quarantine flow.
+        # Legacy flow keeps the independent-evidence gate for automatic deadlines.
+        eligible=bool(self.quarantine) or independent
+        reason='AI：'+result.get('reason','')+('；AI判定广告，先删帖禁言等待人工复核' if self.quarantine else ('；本地独立规则同时命中' if independent else '；证据不足，仅人工复核；模型OCR不作为独立证据'))
+        previous=self.db.execute('SELECT id FROM cases WHERE cid=? AND mid=? ORDER BY revision DESC LIMIT 1',(cid,message['message_id'])).fetchone()
+        c=self.open(message,reason,eligible=eligible,dry=False)
+        # A weak/repetition case can exist before the AI verdict. Upgrade its
+        # existing card, without creating a duplicate or replaying containment.
+        if c and previous and previous['id']==c['id'] and self.quarantine and not c['dry'] and c['state'] in {'pending','held'} and c['report_id'] and not self.quarantine.get(c['id']):
+            self.db.execute('UPDATE cases SET reason=? WHERE id=?',(reason[:300],c['id']));self.db.commit()
+            self.quarantine.start(c['id']);self.refresh(c['id'])
         if c and ocr:
             self.db.execute('UPDATE cases SET learn_text=? WHERE id=?',(ocr[:512],c['id']));self.db.commit()
             if self.quarantine:self.refresh(c['id'])

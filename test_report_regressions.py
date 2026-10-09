@@ -19,13 +19,16 @@ class ReportRegressions(unittest.TestCase):
     methods=fixture.QuarantineTests.methods
     callback=fixture.QuarantineTests.callback
 
-    def test_model_ocr_is_not_independent_image_evidence(self):
+    def test_ai_image_spam_temporarily_contained_without_permanent_ban(self):
         m={**sample(text=''),'photo':[{'file_id':'image'}]}
         self.cases.track(m)
         self.cases.ai_result(m,{'label':'spam','reason':'广告','observed_text':sample()['text']})
         self.assertEqual(self.cases.get(1)['state'],'pending')
-        self.assertNotIn('restrictChatMember',self.methods())
-        self.assertNotIn('deleteMessage',self.methods())
+        self.assertIn('restrictChatMember',self.methods())
+        self.assertIn('deleteMessage',self.methods())
+        self.assertNotIn('banChatMember',self.methods())
+        self.assertEqual(self.cases.get(1)['deadline'],0)
+        self.assertEqual(self.store.db.execute('select count(*) from active_bans').fetchone()[0],0)
         self.assertEqual(self.cases.get(1)['learn_text'],sample()['text'])
 
     def test_independent_caption_plus_ai_can_contain(self):
